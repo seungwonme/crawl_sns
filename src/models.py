@@ -40,6 +40,7 @@ class Post(BaseModel):
         url (Optional[str]): 게시글 직접 링크
         likes (Optional[int]): 좋아요/추천 수
         comments (Optional[int]): 댓글 수
+        reposts (Optional[int]): 리포스트 수
         shares (Optional[int]): 공유/리포스트 수
     """
 
@@ -50,6 +51,7 @@ class Post(BaseModel):
     url: Optional[str] = None
     likes: Optional[int] = None
     comments: Optional[int] = None
+    reposts: Optional[int] = None
     shares: Optional[int] = None
 
     class Config:

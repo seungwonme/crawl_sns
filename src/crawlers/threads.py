@@ -747,17 +747,11 @@ class ThreadsCrawler(BaseCrawler):
     async def _find_current_post_elements(self, page: Page) -> List[Any]:
         """현재 DOM에 있는 게시글 요소들을 찾습니다."""
         try:
-            # 주요 패턴들로 게시글 컨테이너 찾기
-            post_containers = await page.query_selector_all("div.x78zum5.xdt5ytf")
+            # data 속성 기반으로 게시글 컨테이너 찾기 (클래스보다 안정적)
+            post_containers = await page.query_selector_all('div[data-pressable-container="true"]')
 
             if not post_containers:
-                # 대안 패턴
-                post_containers = await page.query_selector_all(
-                    'div[data-pressable-container="true"]'
-                )
-
-            if not post_containers:
-                # 게시글 링크 기반으로 상위 컨테이너 찾기
+                # 대안: 게시글 링크가 있는 상위 컨테이너 찾기
                 post_links = await page.query_selector_all('a[href*="/@"][href*="/post/"]')
                 containers = []
                 for link in post_links:
@@ -765,10 +759,12 @@ class ThreadsCrawler(BaseCrawler):
                         container = await link.evaluate_handle(
                             """(element) => {
                                 let current = element;
-                                for (let i = 0; i < 6; i++) {
+                                for (let i = 0; i < 8; i++) {
                                     if (current.parentElement) {
                                         current = current.parentElement;
-                                        if (current.querySelector('a[href*="/@"]:not([href*="/post/"])') &&
+                                        // data-pressable-container 속성이 있는 컨테이너 찾기
+                                        if (current.hasAttribute('data-pressable-container') &&
+                                            current.querySelector('a[href*="/@"]:not([href*="/post/"])') &&
                                             current.textContent && current.textContent.length > 50) {
                                             return current;
                                         }
@@ -815,7 +811,7 @@ class ThreadsCrawler(BaseCrawler):
         return f"{author}:{content[:100]}"  # 첫 100자로 제한
 
     async def _find_post_elements(self, page: Page, count: int) -> List[Any]:
-        """실제 HTML 구조 기반으로 게시글 DOM 요소들을 찾습니다."""
+        """안정적인 셀렉터로 게시글 DOM 요소들을 찾습니다."""
         post_elements = []
 
         # 로그인 상태에 따라 다른 접근 방법 사용
@@ -823,33 +819,25 @@ class ThreadsCrawler(BaseCrawler):
             await self._scroll_to_load_more_posts(page, count)
 
         try:
-            # 피드백 분석: 실제 HTML에서 각 게시글은 div.x78zum5.xdt5ytf로 시작하는 블록
-            typer.echo(f"🔍 실제 HTML 구조 기반으로 게시글 컨테이너 찾기")
+            typer.echo(f"🔍 안정적인 셀렉터로 게시글 컨테이너 찾기")
 
-            # 방법 1: 특정 클래스 패턴으로 게시글 컨테이너 찾기
-            post_containers = await page.query_selector_all("div.x78zum5.xdt5ytf")
-            typer.echo(f"   div.x78zum5.xdt5ytf 패턴: {len(post_containers)}개 발견")
-
-            if not post_containers:
-                # 방법 2: data-pressable-container 속성 활용
-                post_containers = await page.query_selector_all(
-                    'div[data-pressable-container="true"]'
-                )
-                typer.echo(f"   data-pressable-container 패턴: {len(post_containers)}개 발견")
+            # 방법 1: data 속성 기반으로 게시글 컨테이너 찾기 (가장 안정적)
+            post_containers = await page.query_selector_all('div[data-pressable-container="true"]')
+            typer.echo(f"   data-pressable-container 패턴: {len(post_containers)}개 발견")
 
             if not post_containers:
-                # 방법 3: 게시글 링크 기반으로 상위 컨테이너 찾기
+                # 방법 2: 게시글 링크가 있는 상위 컨테이너 찾기
                 post_links = await page.query_selector_all('a[href*="/@"][href*="/post/"]')
                 typer.echo(f"   게시글 링크: {len(post_links)}개 발견")
 
                 containers = []
                 for link in post_links[: count * 2]:
                     try:
-                        # 상위 6단계까지 올라가서 게시글 컨테이너 찾기
+                        # 상위 8단계까지 올라가서 게시글 컨테이너 찾기
                         container = await link.evaluate_handle(
                             """(element) => {
                                 let current = element;
-                                for (let i = 0; i < 6; i++) {
+                                for (let i = 0; i < 8; i++) {
                                     if (current.parentElement) {
                                         current = current.parentElement;
                                         // 게시글 컨테이너 조건: 작성자, 시간, 콘텐츠 모두 포함
@@ -878,24 +866,17 @@ class ThreadsCrawler(BaseCrawler):
             valid_containers = []
             for container_candidate in post_containers:
                 try:
-                    # 피드백 분석: 실제 게시글인지 확인 (작성자, 시간, 콘텐츠)
+                    # 실제 게시글인지 확인 (안정적인 요소들로 검증)
 
-                    # 1. 작성자 확인 (링크 또는 텍스트에서)
+                    # 1. 작성자 확인 (href 패턴으로)
                     has_author = False
                     author_link = await container_candidate.query_selector(
                         'a[href*="/@"]:not([href*="/post/"])'
                     )
                     if author_link:
                         has_author = True
-                    else:
-                        # 텍스트에서 작성자명 패턴 확인
-                        text = await container_candidate.inner_text()
-                        if text and re.search(
-                            r"^[a-zA-Z0-9_.]+$", text.split("\n")[0] if text.split("\n") else ""
-                        ):
-                            has_author = True
 
-                    # 2. 시간 정보 확인
+                    # 2. 시간 정보 확인 (semantic 태그로)
                     time_element = await container_candidate.query_selector("time[datetime]")
                     has_time = time_element is not None
 
@@ -905,23 +886,23 @@ class ThreadsCrawler(BaseCrawler):
                         if text and re.search(r"\d+[hdmws]|\d+\s?(시간|분|일|주)", text):
                             has_time = True
 
-                    # 3. 콘텐츠 확인 (최소한의 텍스트)
-                    has_content = False
-                    content_spans = await container_candidate.query_selector_all(
-                        'span[class*="xi7mnp6"]'
-                    )
-                    if len(content_spans) > 0:
-                        has_content = True
-                    else:
-                        # 전체 텍스트 길이로 판단
-                        text = await container_candidate.inner_text()
-                        if (
-                            text and len(text.strip()) > 50
-                        ):  # 50자 이상의 텍스트가 있으면 콘텐츠로 간주
-                            has_content = True
+                    # 3. 상호작용 버튼 확인 (aria-label로)
+                    has_interactions = False
+                    for aria_label in ["Like", "Comment", "Reply", "Repost", "Share"]:
+                        if await container_candidate.query_selector(
+                            f'svg[aria-label="{aria_label}"]'
+                        ):
+                            has_interactions = True
+                            break
 
-                    # 4. 기본 조건 확인
-                    if has_author and (has_time or has_content):
+                    # 4. 콘텐츠 확인 (최소한의 텍스트)
+                    has_content = False
+                    text = await container_candidate.inner_text()
+                    if text and len(text.strip()) > 50:  # 50자 이상의 텍스트가 있으면 콘텐츠로 간주
+                        has_content = True
+
+                    # 5. 기본 조건 확인 (작성자와 시간 또는 상호작용 버튼이 있어야 함)
+                    if has_author and (has_time or has_interactions):
                         # 중복 방지
                         is_duplicate = False
                         for existing in valid_containers:
@@ -943,7 +924,7 @@ class ThreadsCrawler(BaseCrawler):
                             valid_containers.append(container_candidate)
                             if self.debug_mode:
                                 typer.echo(
-                                    f"   ✅ 유효한 게시글 {len(valid_containers)} 추가 (작성자:{has_author}, 시간:{has_time}, 콘텐츠:{has_content})"
+                                    f"   ✅ 유효한 게시글 {len(valid_containers)} 추가 (작성자:{has_author}, 시간:{has_time}, 상호작용:{has_interactions}, 콘텐츠:{has_content})"
                                 )
                             else:
                                 typer.echo(f"   ✅ 유효한 게시글 {len(valid_containers)} 추가")
@@ -961,9 +942,7 @@ class ThreadsCrawler(BaseCrawler):
         except Exception as e:
             typer.echo(f"❌ 게시글 요소 찾기 중 오류: {e}")
 
-        typer.echo(
-            f"🔗 실제 HTML 구조 기반으로 {len(post_elements)}개의 게시글 컨테이너를 찾았습니다"
-        )
+        typer.echo(f"🔗 안정적인 셀렉터로 {len(post_elements)}개의 게시글 컨테이너를 찾았습니다")
         return post_elements[:count]
 
     async def _scroll_to_load_more_posts(self, page: Page, target_count: int) -> None:
@@ -982,13 +961,13 @@ class ThreadsCrawler(BaseCrawler):
                 await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 await page.wait_for_timeout(3000)  # 로딩 대기 시간 증가
 
-                # 현재 로드된 게시글 수 확인 (실제 HTML 구조 기반)
-                current_posts = await page.query_selector_all("div.x78zum5.xdt5ytf")
+                # 현재 로드된 게시글 수 확인 (안정적인 셀렉터 사용)
+                current_posts = await page.query_selector_all(
+                    'div[data-pressable-container="true"]'
+                )
                 if not current_posts:
-                    # 대안 패턴
-                    current_posts = await page.query_selector_all(
-                        'div[data-pressable-container="true"]'
-                    )
+                    # 대안: 게시글 링크 개수로 추정
+                    current_posts = await page.query_selector_all('a[href*="/@"][href*="/post/"]')
 
                 typer.echo(f"   스크롤 {scroll_attempt + 1}: {len(current_posts)}개 게시글 로드됨")
 
@@ -1047,9 +1026,26 @@ class ThreadsCrawler(BaseCrawler):
         }
 
     async def _extract_author(self, element) -> str:
-        """작성자 정보 추출 (완전히 재작성된 로직)"""
+        """작성자 정보 추출 - 안정적인 셀렉터 사용"""
         try:
-            # 방법 1: 게시글 컨테이너에서 직접 작성자 텍스트 찾기
+            # 방법 1: href 링크에서 직접 추출 (가장 안정적)
+            author_links = await element.query_selector_all('a[href*="/@"]:not([href*="/post/"])')
+
+            for author_link in author_links:
+                href = await author_link.get_attribute("href")
+                if href and "/@" in href and "/post/" not in href:
+                    author = href.split("/@")[-1].split("/")[0]
+
+                    if self.debug_mode:
+                        link_text = await author_link.inner_text()
+                        typer.echo(
+                            f"   👤 링크에서 발견된 작성자: '{author}' (링크: {href}, 텍스트: '{link_text[:30]}')"
+                        )
+
+                    if len(author) > 1 and author.replace("_", "").replace(".", "").isalnum():
+                        return author
+
+            # 방법 2: 게시글 컨테이너에서 텍스트 분석 (fallback)
             full_text = await element.inner_text()
             if full_text:
                 lines = full_text.split("\n")
@@ -1058,8 +1054,16 @@ class ThreadsCrawler(BaseCrawler):
                 if self.debug_mode:
                     typer.echo(f"   📝 텍스트 분석 (첫 10줄): {lines[:10]}")
 
-                # "For you", "Following", "What's new?", "Post" 등 헤더 텍스트 건너뛰기
-                skip_texts = ["For you", "Following", "What's new?", "Post", "Translate", "Sorry,"]
+                # 건너뛸 헤더 텍스트들
+                skip_texts = [
+                    "For you",
+                    "Following",
+                    "What's new?",
+                    "Post",
+                    "Translate",
+                    "Sorry,",
+                    "reposted",
+                ]
 
                 for line in lines:
                     line = line.strip()
@@ -1073,12 +1077,12 @@ class ThreadsCrawler(BaseCrawler):
                         line
                         and len(line) > 2
                         and len(line) < 50
-                        and not any(skip in line for skip in skip_texts)
+                        and not any(skip in line.lower() for skip in skip_texts)
                         and not line.isdigit()
-                        and not re.match(
-                            r"^\d+[KMB]?$", line
-                        )  # 숫자만 있는 라인 제외 (좋아요 수 등)
-                        and not "reposted" in line.lower()
+                        and not re.match(r"^\d+[KMB]?$", line)  # 숫자만 있는 라인 제외
+                        and not "Like" in line
+                        and not "Comment" in line
+                        and not "Share" in line
                     ):
 
                         # 잠재적 작성자명인지 확인
@@ -1095,23 +1099,6 @@ class ThreadsCrawler(BaseCrawler):
                                     f"   👤 텍스트에서 발견된 작성자: '{potential_author}' (라인: '{line}')"
                                 )
                             return potential_author
-
-            # 방법 2: href 링크에서 추출 (fallback)
-            author_links = await element.query_selector_all('a[href*="/@"]:not([href*="/post/"])')
-
-            for author_link in author_links:
-                href = await author_link.get_attribute("href")
-                if href and "/@" in href and "/post/" not in href:
-                    author = href.split("/@")[-1].split("/")[0]
-
-                    if self.debug_mode:
-                        link_text = await author_link.inner_text()
-                        typer.echo(
-                            f"   👤 링크에서 발견된 작성자: '{author}' (링크: {href}, 텍스트: '{link_text[:30]}')"
-                        )
-
-                    if len(author) > 1 and author.replace("_", "").replace(".", "").isalnum():
-                        return author
 
         except Exception as e:
             if self.debug_mode:
@@ -1144,126 +1131,224 @@ class ThreadsCrawler(BaseCrawler):
         return "알 수 없음"
 
     async def _extract_content(self, element) -> str:
-        """피드백 분석에 따른 콘텐츠 추출 - 특정 span 태그 기반"""
+        """콘텐츠 추출 - 클래스 의존성 제거하고 안정적인 방법 사용"""
         try:
-            # 피드백: 콘텐츠는 특정 클래스를 가진 span 안에 있음
-            # 예: <span class="x1lliihq x1plvlek xryxfnj x1n2onr6 x1ji0vk5 x18bv5gf xi7mnp6 ...">
-            content_spans = await element.query_selector_all('span[class*="xi7mnp6"]')
-
+            # 방법 1: data-pressable-container 내에서 실제 콘텐츠 영역 찾기
+            # 작성자/시간/버튼이 아닌 주요 텍스트 콘텐츠 추출
             content_parts = []
-            for span in content_spans:
-                text = await span.inner_text()
-                text = text.strip()
 
-                # "Translate" 버튼 텍스트 제거
-                if "Translate" in text:
-                    text = text.split("Translate")[0].strip()
+            # 전체 텍스트를 가져와서 구조적으로 분석
+            full_text = await element.inner_text()
+            if not full_text:
+                return ""
 
-                # 상호작용 수치 제외 (4자 이하 숫자)
-                if not (
-                    len(text) <= 4
-                    and text.replace("K", "")
-                    .replace("M", "")
-                    .replace("B", "")
-                    .replace(".", "")
-                    .isdigit()
-                ):
-                    if text and len(text) > 2:
-                        content_parts.append(text)
+            lines = full_text.split("\n")
 
-            # 여러 span에 나뉘어 있을 수 있으므로 조합
+            # 필터링할 패턴들 (작성자, 시간, 버튼 텍스트 등)
+            skip_patterns = [
+                r"^\d+[hdmws]$",  # 시간 패턴 (1h, 2d, 3w 등)
+                r"^\d+\s?(시간|분|일|주)",  # 한국어 시간 패턴
+                r"^[a-zA-Z0-9_.]+$",  # 사용자명만 있는 라인
+                r"^\d+[KMB]?$",  # 숫자만 있는 라인 (상호작용 수)
+                r"^(Like|Comment|Reply|Repost|Share|More|Translate)$",  # 버튼 텍스트
+                r"^(For you|Following|What\'s new\?|Post|Sorry,)$",  # 헤더 텍스트
+                r"reposted.*ago$",  # 리포스트 정보
+                r"^Learn more$",  # 기타 버튼
+            ]
+
+            skip_keywords = ["Translate", "Learn more", "reposted"]
+
+            content_started = False
+
+            for line in lines:
+                line = line.strip()
+
+                # 빈 라인 건너뛰기
+                if not line:
+                    continue
+
+                # 건너뛸 패턴인지 확인
+                should_skip = False
+                for pattern in skip_patterns:
+                    if re.match(pattern, line):
+                        should_skip = True
+                        break
+
+                # 키워드 기반 필터링
+                if not should_skip:
+                    for keyword in skip_keywords:
+                        if keyword in line:
+                            should_skip = True
+                            break
+
+                # 실제 콘텐츠로 판단되는 조건
+                if not should_skip and len(line) > 5:  # 5자 이상의 의미있는 텍스트
+                    content_started = True
+                    content_parts.append(line)
+                elif content_started and should_skip:
+                    # 콘텐츠가 시작된 후 버튼/메타 정보가 나오면 중단
+                    break
+
+            # 방법 2: 특정 영역에서 콘텐츠 span 찾기 (fallback)
+            if not content_parts:
+                # time 태그 이후의 div에서 텍스트 찾기
+                time_element = await element.query_selector("time[datetime]")
+                if time_element:
+                    # time 요소의 상위 컨테이너에서 콘텐츠 영역 찾기
+                    content_container = await time_element.evaluate_handle(
+                        """(timeEl) => {
+                            let current = timeEl;
+                            for (let i = 0; i < 5; i++) {
+                                if (current.parentElement) {
+                                    current = current.parentElement;
+                                    // 콘텐츠가 있을만한 div 찾기
+                                    let contentDiv = current.parentElement;
+                                    if (contentDiv) {
+                                        let spans = contentDiv.querySelectorAll('span');
+                                        for (let span of spans) {
+                                            if (span.textContent && span.textContent.length > 10) {
+                                                return contentDiv;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            return null;
+                        }"""
+                    )
+
+                    if content_container:
+                        container_element = content_container.as_element()
+                        if container_element:
+                            spans = await container_element.query_selector_all("span")
+                            for span in spans:
+                                text = await span.inner_text()
+                                text = text.strip()
+
+                                # 긴 텍스트이면서 버튼/메타 정보가 아닌 것
+                                if (
+                                    len(text) > 10
+                                    and not re.match(r"^\d+[KMB]?$", text)
+                                    and text
+                                    not in [
+                                        "Like",
+                                        "Comment",
+                                        "Reply",
+                                        "Repost",
+                                        "Share",
+                                        "More",
+                                        "Translate",
+                                    ]
+                                ):
+                                    content_parts.append(text)
+
+            # 결과 정리
             full_content = " ".join(content_parts).strip()
 
-            # 알려진 버튼 텍스트들 제거
-            known_button_texts = ["Like", "Comment", "Repost", "Share", "More", "Verified"]
-            for btn_text in known_button_texts:
-                full_content = full_content.replace(btn_text, "").strip()
+            # 추가 정리
+            full_content = re.sub(r"\s+", " ", full_content)  # 연속 공백 정리
+            full_content = re.sub(r"\S+…", "", full_content)  # URL 단축 표시 제거
 
-            # URL 단축 표시 제거 (예: mazdafitment.com/2025…)
-            full_content = re.sub(r"\S+…", "", full_content).strip()
-
-            # 연속된 공백 정리
-            full_content = re.sub(r"\s+", " ", full_content).strip()
+            if self.debug_mode and full_content:
+                typer.echo(f"   📝 추출된 콘텐츠: '{full_content[:100]}...'")
 
             return full_content[:500] if full_content else ""
 
         except Exception as e:
-            typer.echo(f"   콘텐츠 추출 중 오류: {e}")
+            if self.debug_mode:
+                typer.echo(f"   ⚠️ 콘텐츠 추출 중 오류: {e}")
             return ""
 
     async def _extract_interactions(self, element) -> Dict[str, Optional[int]]:
-        """피드백 분석에 따른 상호작용 정보 추출 - SVG aria-label 기반"""
-        interactions: Dict[str, Optional[int]] = {"likes": 0, "comments": 0, "shares": 0}
+        """상호작용 정보 추출 - aria-label과 구조적 관계 활용"""
+        interactions: Dict[str, Optional[int]] = {
+            "likes": 0,
+            "comments": 0,
+            "reposts": 0,
+            "shares": 0,
+        }
 
         try:
-            # 피드백: SVG의 aria-label을 활용하여 상호작용 찾기
+            # aria-label 기반으로 각 상호작용 버튼 찾기 (클래스보다 안정적)
 
             # 좋아요 (Like)
             like_svg = await element.query_selector('svg[aria-label="Like"]')
             if like_svg:
                 try:
-                    # 피드백: svg -> ancestor::div[@role='button'] -> span 경로
+                    # SVG의 부모 버튼 요소 찾기
                     like_button = await like_svg.evaluate_handle(
                         "(svg) => svg.closest('div[role=\"button\"]') || svg.closest('button')"
                     )
                     if like_button:
-                        # 피드백: div[class^="xu9jpxn"] > span[class^="x17qophe"] 패턴
-                        count_span = await like_button.query_selector(
-                            'div[class*="xu9jpxn"] span[class*="x17qophe"]'
+                        # 버튼 내에서 숫자만 포함된 span 찾기 (클래스 무관)
+                        number_text = await like_button.evaluate(
+                            """(button) => {
+                                const spans = button.querySelectorAll('span');
+                                for (let span of spans) {
+                                    const text = span.textContent?.trim();
+                                    if (text && /^\\d+[KMB]?$/.test(text)) {
+                                        return text;
+                                    }
+                                }
+                                // fallback: 버튼 전체 텍스트에서 숫자 추출
+                                const buttonText = button.textContent || '';
+                                const numbers = buttonText.match(/\\d+[KMB]?/g);
+                                return numbers ? numbers[0] : '0';
+                            }"""
                         )
-                        if count_span:
-                            count_text = await count_span.inner_text()
-                            interactions["likes"] = (
-                                self._parse_interaction_count(count_text.strip())
-                                if count_text
-                                else 0
-                            )
-                            if self.debug_mode:
-                                typer.echo(
-                                    f"   ✅ Like 추출: {count_text} → {interactions['likes']}"
-                                )
-                        else:
-                            # 대안: 버튼 전체 텍스트에서 숫자 찾기
-                            button_text = await like_button.inner_text()
-                            numbers = re.findall(r"\d+", button_text)
-                            if numbers:
-                                interactions["likes"] = int(numbers[0])
-                                typer.echo(
-                                    f"   ✅ Like 추출 (대안): {button_text} → {interactions['likes']}"
-                                )
-                except Exception as e:
-                    typer.echo(f"   ⚠️ Like 추출 중 오류: {e}")
 
-            # 댓글 (Comment)
+                        interactions["likes"] = (
+                            self._parse_interaction_count(number_text) if number_text else 0
+                        )
+
+                        if self.debug_mode:
+                            typer.echo(f"   ✅ Like 추출: {number_text} → {interactions['likes']}")
+
+                except Exception as e:
+                    if self.debug_mode:
+                        typer.echo(f"   ⚠️ Like 추출 중 오류: {e}")
+
+            # 댓글 (Comment/Reply)
             comment_svg = await element.query_selector('svg[aria-label="Comment"]')
+            if not comment_svg:
+                comment_svg = await element.query_selector('svg[aria-label="Reply"]')
+
             if comment_svg:
                 try:
                     comment_button = await comment_svg.evaluate_handle(
                         "(svg) => svg.closest('div[role=\"button\"]') || svg.closest('button')"
                     )
                     if comment_button:
-                        count_span = await comment_button.query_selector(
-                            'div[class*="xu9jpxn"] span[class*="x17qophe"]'
+                        number_text = await comment_button.evaluate(
+                            """(button) => {
+                                const spans = button.querySelectorAll('span');
+                                for (let span of spans) {
+                                    const text = span.textContent?.trim();
+                                    if (text && /^\\d+[KMB]?$/.test(text)) {
+                                        return text;
+                                    }
+                                }
+                                // fallback: 버튼 전체 텍스트에서 숫자 추출
+                                const buttonText = button.textContent || '';
+                                const numbers = buttonText.match(/\\d+[KMB]?/g);
+                                return numbers ? numbers[0] : '0';
+                            }"""
                         )
-                        if count_span:
-                            count_text = await count_span.inner_text()
-                            interactions["comments"] = (
-                                self._parse_interaction_count(count_text.strip())
-                                if count_text
-                                else 0
-                            )
-                            if self.debug_mode:
-                                typer.echo(
-                                    f"   ✅ Comment 추출: {count_text} → {interactions['comments']}"
-                                )
-                        else:
-                            # 댓글은 숫자가 없을 때 span 자체가 없을 수 있음
-                            interactions["comments"] = 0
-                            typer.echo(f"   ✅ Comment 추출: 숫자 없음 → 0")
-                except Exception as e:
-                    typer.echo(f"   ⚠️ Comment 추출 중 오류: {e}")
 
-            # 리포스트/공유 (Repost)
+                        interactions["comments"] = (
+                            self._parse_interaction_count(number_text) if number_text else 0
+                        )
+
+                        if self.debug_mode:
+                            typer.echo(
+                                f"   ✅ Comment 추출: {number_text} → {interactions['comments']}"
+                            )
+
+                except Exception as e:
+                    if self.debug_mode:
+                        typer.echo(f"   ⚠️ Comment 추출 중 오류: {e}")
+
+            # 리포스트 (Repost) - reposts 필드로 매핑
             repost_svg = await element.query_selector('svg[aria-label="Repost"]')
             if repost_svg:
                 try:
@@ -1271,54 +1356,78 @@ class ThreadsCrawler(BaseCrawler):
                         "(svg) => svg.closest('div[role=\"button\"]') || svg.closest('button')"
                     )
                     if repost_button:
-                        count_span = await repost_button.query_selector(
-                            'div[class*="xu9jpxn"] span[class*="x17qophe"]'
+                        number_text = await repost_button.evaluate(
+                            """(button) => {
+                                const spans = button.querySelectorAll('span');
+                                for (let span of spans) {
+                                    const text = span.textContent?.trim();
+                                    if (text && /^\\d+[KMB]?$/.test(text)) {
+                                        return text;
+                                    }
+                                }
+                                // fallback: 버튼 전체 텍스트에서 숫자 추출
+                                const buttonText = button.textContent || '';
+                                const numbers = buttonText.match(/\\d+[KMB]?/g);
+                                return numbers ? numbers[0] : '0';
+                            }"""
                         )
-                        if count_span:
-                            count_text = await count_span.inner_text()
-                            interactions["shares"] = (
-                                self._parse_interaction_count(count_text.strip())
-                                if count_text
-                                else 0
-                            )
-                            if self.debug_mode:
-                                typer.echo(
-                                    f"   ✅ Repost 추출: {count_text} → {interactions['shares']}"
-                                )
-                        else:
-                            interactions["shares"] = 0
-                            typer.echo(f"   ✅ Repost 추출: 숫자 없음 → 0")
-                except Exception as e:
-                    typer.echo(f"   ⚠️ Repost 추출 중 오류: {e}")
 
-            # Share 버튼 (Repost가 없을 경우)
-            if interactions["shares"] == 0:
-                share_svg = await element.query_selector('svg[aria-label="Share"]')
-                if share_svg:
-                    try:
-                        share_button = await share_svg.evaluate_handle(
-                            "(svg) => svg.closest('div[role=\"button\"]') || svg.closest('button')"
+                        interactions["reposts"] = (
+                            self._parse_interaction_count(number_text) if number_text else 0
                         )
-                        if share_button:
-                            count_span = await share_button.query_selector(
-                                'div[class*="xu9jpxn"] span[class*="x17qophe"]'
+
+                        if self.debug_mode:
+                            typer.echo(
+                                f"   ✅ Repost 추출: {number_text} → {interactions['reposts']}"
                             )
-                            if count_span:
-                                count_text = await count_span.inner_text()
-                                interactions["shares"] = (
-                                    self._parse_interaction_count(count_text.strip())
-                                    if count_text
-                                    else 0
-                                )
-                                if self.debug_mode:
-                                    typer.echo(
-                                        f"   ✅ Share 추출: {count_text} → {interactions['shares']}"
-                                    )
-                    except Exception as e:
+
+                except Exception as e:
+                    if self.debug_mode:
+                        typer.echo(f"   ⚠️ Repost 추출 중 오류: {e}")
+
+            # 공유 (Share) - shares 필드로 매핑
+            share_svg = await element.query_selector('svg[aria-label="Share"]')
+            if share_svg:
+                try:
+                    share_button = await share_svg.evaluate_handle(
+                        "(svg) => svg.closest('div[role=\"button\"]') || svg.closest('button')"
+                    )
+                    if share_button:
+                        number_text = await share_button.evaluate(
+                            """(button) => {
+                                const spans = button.querySelectorAll('span');
+                                for (let span of spans) {
+                                    const text = span.textContent?.trim();
+                                    if (text && /^\\d+[KMB]?$/.test(text)) {
+                                        return text;
+                                    }
+                                }
+                                // fallback: 버튼 전체 텍스트에서 숫자 추출
+                                const buttonText = button.textContent || '';
+                                const numbers = buttonText.match(/\\d+[KMB]?/g);
+                                return numbers ? numbers[0] : '0';
+                            }"""
+                        )
+
+                        interactions["shares"] = (
+                            self._parse_interaction_count(number_text) if number_text else 0
+                        )
+
+                        if self.debug_mode:
+                            typer.echo(
+                                f"   ✅ Share 추출: {number_text} → {interactions['shares']}"
+                            )
+
+                except Exception as e:
+                    if self.debug_mode:
                         typer.echo(f"   ⚠️ Share 추출 중 오류: {e}")
 
+            if self.debug_mode:
+                typer.echo(f"   📊 최종 상호작용: {interactions}")
+
         except Exception as e:
-            typer.echo(f"   상호작용 추출 중 오류: {e}")
+            if self.debug_mode:
+                typer.echo(f"   ❌ 상호작용 추출 중 오류: {e}")
 
         return interactions
 
