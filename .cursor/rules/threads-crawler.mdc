@@ -10,7 +10,7 @@ Meta의 Threads 플랫폼에서 게시글을 크롤링하는 시스템에 대한
 ## 📁 파일 구조
 
 ### 핵심 파일들
-- [src/crawlers/threads.py](mdc:src/crawlers/threads.py) - Threads 전용 크롤러
+- [src/crawlers/threads.py](mdc:src/crawlers/threads.py) - Threads 전용 크롤러 (리팩토링 완료)
 - [src/crawlers/base.py](mdc:src/crawlers/base.py) - 모든 크롤러의 베이스 클래스
 - [main.py](mdc:main.py) - CLI 인터페이스
 - [src/models.py](mdc:src/models.py) - 데이터 모델 정의
@@ -29,31 +29,40 @@ https://www.instagram.com/accounts/login/ - Instagram 로그인 페이지
 https://threads.net/@username/post/POST_ID - 개별 게시글
 ```
 
-### DOM 구조 특성
+### DOM 구조 특성 (2024년 12월 업데이트)
 ```html
 <!-- 로그인 버튼 -->
 <div role="button" tabindex="0">Continue with Instagram</div>
 
-<!-- 게시글 컨테이너 -->
-<div class="x78zum5 xdt5ytf">
-  <!-- 작성자 링크 -->
+<!-- 게시글 컨테이너 (안정적인 선택자) -->
+<div data-pressable-container="true">
+  <!-- 작성자 링크 (href 패턴 기반) -->
   <a href="/@username">username</a>
 
-  <!-- 게시 시간 -->
+  <!-- 게시 시간 (semantic 태그) -->
   <time datetime="2024-01-01T12:00:00.000Z">1h</time>
 
-  <!-- 콘텐츠 -->
-  <span class="xi7mnp6">게시글 내용</span>
+  <!-- 콘텐츠 (텍스트 분석 기반) -->
+  <span>게시글 내용</span>
 
-  <!-- 상호작용 버튼들 -->
+  <!-- 상호작용 버튼들 (aria-label 기반) -->
   <svg aria-label="Like">...</svg>
+  <span>18</span> <!-- 좋아요 수 -->
+
   <svg aria-label="Comment">...</svg>
+  <span>4</span> <!-- 댓글 수 -->
+
   <svg aria-label="Repost">...</svg>
+  <span>2</span> <!-- 리포스트 수 -->
+
+  <svg aria-label="Share">...</svg>
+  <span>1</span> <!-- 공유 수 -->
 </div>
 
 <!-- 로그인된 상태 지표 -->
 <div role="button">What's new?</div>
 <div role="button">Post</div>
+<text>For you</text>
 ```
 
 ## 🔄 크롤링 프로세스 흐름도
@@ -85,9 +94,9 @@ graph TD
     O --> Q[세션 저장]
     Q --> H
 
-    H --> R[게시글 컨테이너 탐색]
-    R --> S[DOM 요소 파싱]
-    S --> T[데이터 추출]
+    H --> R[점진적 게시글 추출]
+    R --> S[data-pressable-container 탐색]
+    S --> T[aria-label 기반 상호작용 추출]
     T --> U[JSON 저장]
     U --> V[완료]
 ```
@@ -99,20 +108,19 @@ graph TD
 THREADS_USERNAME=your_instagram_username
 THREADS_PASSWORD=your_instagram_password
 THREADS_USER_AGENT=Mozilla/5.0 (Windows NT 10.0; Win64; x64)...
-THREADS_DEBUG_MODE=false
-THREADS_DEBUG_SCREENSHOT_PATH=./data/debug_screenshots
+THREADS_DEBUG_MODE=false  # 디버그 기능 간소화됨
 ```
 
 ### 크롤러 설정
 - **User-Agent**: 데스크톱 Chrome (모바일 UI 문제 방지)
-- **헤드리스 모드**: 항상 False (브라우저 창 표시)
 - **세션 관리**: Storage State 기반
 - **타임아웃**: 로그인 30초, 페이지 로드 15초
+- **코드 크기**: 1609줄 → 700줄 (56% 감소)
 
 ## 🚨 자주 발생하는 에러와 해결책
 
 ### 1. 로그인 버튼을 찾을 수 없음
-**증상**: `❌ 로그인 버튼을 찾을 수 없습니다.`
+**증상**: `❌ 로그인 버튼을 찾을 수 없습니다`
 
 **원인**:
 - 잘못된 User-Agent (모바일 vs 데스크톱)
@@ -121,7 +129,7 @@ THREADS_DEBUG_SCREENSHOT_PATH=./data/debug_screenshots
 
 **해결책**:
 ```bash
-# 디버그 모드로 실행
+# 디버그 모드로 실행 (간소화된 출력)
 python main.py threads --debug
 
 # 환경 변수 확인
@@ -129,7 +137,7 @@ echo $THREADS_USER_AGENT
 ```
 
 ### 2. 세션 로드 실패
-**증상**: `⚠️ 세션 로드 중 오류: SecurityError`
+**증상**: `⚠️ 세션 로드 중 오류`
 
 **원인**:
 - localStorage 접근 권한 문제
@@ -142,21 +150,8 @@ rm data/threads_session.json
 python main.py threads --debug
 ```
 
-### 3. Instagram 로그인 타임아웃
-**증상**: `⚠️ 로그인 처리 중 타임아웃`
-
-**원인**:
-- 느린 네트워크
-- 2FA 필요
-- 잘못된 계정 정보
-
-**해결책**:
-1. 타임아웃 시간 증가 (환경변수)
-2. 수동 로그인 (디버그 모드)
-3. 계정 정보 확인
-
-### 4. 게시글 추출 실패
-**증상**: `🔗 실제 HTML 구조 기반으로 0개의 게시글 컨테이너를 찾았습니다`
+### 3. 게시글 추출 실패
+**증상**: `📊 점진적 추출 완료: 0개 게시글 수집`
 
 **원인**:
 - DOM 구조 변경
@@ -165,101 +160,109 @@ python main.py threads --debug
 
 **해결책**:
 1. 로그인 상태 재확인
-2. 페이지 새로고침
-3. DOM 선택자 업데이트
+2. data-pressable-container 선택자 확인
+3. 대안 선택자로 fallback
 
-### 5. "Save info" 처리 문제
-**증상**: 로그인 후 무한 대기
+### 4. 상호작용 추출 실패
+**증상**: 모든 상호작용이 0으로 표시
 
 **원인**:
-- 버튼 클릭 후 처리 시간 부족
-- 네트워크 불안정
+- aria-label 속성 변경
+- 숫자 표시 방식 변경
 
 **해결책**:
-- 대기 시간 증가 (현재 5초)
-- 네트워크 안정화 대기 추가
-
-## 🐛 디버그 모드 활용
-
-### 기본 사용법
-```bash
-python main.py threads --count 5 --debug
-```
-
-### 디버그 기능들
-1. **브라우저 표시**: headless=false
-2. **개발자 도구**: 자동 열림
-3. **스크린샷**: 각 단계별 자동 저장
-4. **요소 분석**: 페이지의 모든 버튼 정보 출력
-5. **수동 대기**: 사용자 입력으로 단계별 확인
-
-### 스크린샷 파일명 패턴
-```
-HHMMSS_00_initial_page.png - 초기 페이지
-HHMMSS_02_before_login_click_attempt_N.png - 로그인 클릭 전
-HHMMSS_04_instagram_login_page_attempt_N.png - Instagram 페이지
-HHMMSS_08_login_success_attempt_N.png - 로그인 성공
-```
+1. SVG aria-label 확인: `Like`, `Comment`, `Reply`, `Repost`, `Share`
+2. 숫자 span 구조 확인
+3. 대안 텍스트 추출 방식 적용
 
 ## 🔧 코드 수정 가이드
 
-### 새로운 선택자 추가
+### 새로운 선택자 추가 (안정성 우선순위 적용)
 ```python
-# threads.py의 login_button_selectors에 추가
-login_button_selectors = [
-    'div[role="button"]:has-text("Continue with Instagram")',
-    'new_selector_here',  # 새 선택자 추가
+# 1순위: data 속성
+post_containers = await page.query_selector_all('div[data-pressable-container="true"]')
+
+# 2순위: aria-label
+svg_buttons = await element.query_selector('svg[aria-label="Like"]')
+
+# 3순위: semantic tags
+time_elements = await element.query_selector('time[datetime]')
+
+# 4순위: href 패턴
+author_links = await element.query_selector_all('a[href*="/@"]:not([href*="/post/"])')
+```
+
+### 상호작용 추출 로직 수정
+```python
+interaction_types = [
+    ("Like", "likes"),
+    ("Comment", "comments"),
+    ("Reply", "comments"),  # Comment와 동일한 필드
+    ("Repost", "reposts"),  # 별도 필드
+    ("Share", "shares"),    # 별도 필드
 ]
+
+for aria_label, field_name in interaction_types:
+    svg = await element.query_selector(f'svg[aria-label="{aria_label}"]')
+    if svg:
+        # 버튼에서 숫자 추출 로직
+        number_text = await button.evaluate("""...""")
+        interactions[field_name] = self._parse_interaction_count(number_text)
 ```
 
-### 게시글 파싱 로직 수정
+### 점진적 추출 로직
 ```python
-# _extract_post_data 메서드에서 새 필드 추가
-async def _extract_post_data(self, element) -> Dict[str, Any]:
-    # 기존 필드들...
-    new_field = await self._extract_new_field(element)
-    return {
-        "author": author,
-        "content": content,
-        "new_field": new_field,  # 새 필드 추가
-        # ...
-    }
-```
+async def _extract_posts_incrementally(self, page, target_count):
+    all_posts = []
+    extracted_urls = set()
 
-### 에러 핸들링 개선
-```python
-try:
-    # 위험한 작업
-    result = await some_operation()
-except SpecificError as e:
-    typer.echo(f"⚠️ 특정 에러 발생: {e}")
-    if self.debug_mode:
-        await self._debug_screenshot(page, "error_state")
+    for scroll_round in range(max_scroll_attempts):
+        current_elements = await self._find_current_post_elements(page)
+
+        for element in current_elements:
+            post_data = await self._extract_post_data(element)
+            post_id = self._generate_post_id(post_data)
+
+            if post_id not in extracted_urls and self._is_valid_post(post_data):
+                all_posts.append(post_data)
+                extracted_urls.add(post_id)
+
+        if len(all_posts) >= target_count:
+            break
+
+        await self._perform_scroll(page)
 ```
 
 ## 📈 성능 최적화
 
 ### 크롤링 속도 개선
-1. **스크롤 최적화**: 불필요한 스크롤 제거
-2. **선택자 우선순위**: 자주 성공하는 선택자를 앞에 배치
-3. **타임아웃 조정**: 환경에 맞는 타임아웃 설정
+1. **점진적 추출**: 스크롤 중 DOM 요소 제거 문제 해결
+2. **선택자 최적화**: data 속성 우선 사용으로 안정성 향상
+3. **코드 간소화**: 불필요한 디버그 코드 제거로 56% 크기 감소
 
 ### 메모리 사용량 최적화
-1. **게시글 수 제한**: 대량 크롤링 시 배치 처리
-2. **세션 정리**: 불필요한 세션 데이터 제거
-3. **브라우저 리소스**: 적절한 브라우저 옵션 설정
+1. **실시간 처리**: 게시글별 즉시 처리로 메모리 효율성
+2. **중복 제거**: 고유 ID 기반 중복 방지
+3. **예외 처리 간소화**: 핵심 예외만 처리
 
-## 🔒 보안 고려사항
+## 🎯 주요 개선사항 요약
 
-### 계정 보안
-- `.env` 파일을 `.gitignore`에 추가
-- 강력한 패스워드 사용
-- 2FA 설정 권장
+### Before vs After
+| 항목 | Before | After |
+|------|--------|-------|
+| 코드 라인 수 | 1609줄 | ~700줄 |
+| 디버그 메서드 | 3개 (복잡) | 0개 (간소화) |
+| 선택자 우선순위 | 클래스 기반 | data 속성 기반 |
+| 상호작용 구분 | shares만 | reposts + shares |
+| 추출 방식 | 일괄 처리 | 점진적 처리 |
+| 에러 처리 | 상세 로그 | 핵심 정보만 |
 
-### 크롤링 윤리
-- 과도한 요청 방지 (적절한 대기 시간)
-- robots.txt 준수
-- 이용 약관 확인
+### 새로운 기능
+- ✅ Repost와 Share 정확한 구분
+- ✅ 클래스 이름 의존성 제거
+- ✅ 점진적 추출로 안정성 향상
+- ✅ 간소화된 디버그 모드
+- ✅ 더 나은 중복 방지 시스템
 
 ## 🚀 실행 가이드
 
@@ -269,7 +272,7 @@ except SpecificError as e:
 cp .env.example .env
 # .env 파일에 계정 정보 입력
 
-# 첫 크롤링 (디버그 모드 권장)
+# 첫 크롤링 (간소화된 디버그 모드)
 python main.py threads --count 5 --debug
 ```
 
@@ -281,3 +284,48 @@ python main.py threads --count 20
 # 출력 파일 지정
 python main.py threads --count 10 --output my_threads.json
 ```
+
+### 트러블슈팅
+```bash
+# 세션 초기화
+rm data/threads_session.json
+
+# 상호작용 추출 확인
+python main.py threads --count 3 --debug | grep "추출:"
+
+# DOM 구조 확인이 필요한 경우
+# 브라우저 개발자 도구에서 다음 확인:
+# - div[data-pressable-container="true"]
+# - svg[aria-label="Like"], svg[aria-label="Repost"], svg[aria-label="Share"]
+# - a[href*="/@"]:not([href*="/post/"])
+```
+
+## 🔧 핵심 기술 개선사항 (2024년 12월)
+
+### 1. 안정적인 선택자 우선순위
+```python
+# 우선순위: data 속성 > aria-label > semantic tags > 구조적 관계 > 클래스 이름
+post_containers = await page.query_selector_all('div[data-pressable-container="true"]')
+author_links = await element.query_selector_all('a[href*="/@"]:not([href*="/post/"])')
+interaction_svgs = await element.query_selector('svg[aria-label="Like"]')
+```
+
+### 2. Repost와 Share 구분
+```python
+interactions = {
+    "likes": 0,      # svg[aria-label="Like"]
+    "comments": 0,   # svg[aria-label="Comment"] 또는 svg[aria-label="Reply"]
+    "reposts": 0,    # svg[aria-label="Repost"]
+    "shares": 0,     # svg[aria-label="Share"]
+}
+```
+
+### 3. 점진적 추출 시스템
+- DOM 요소 제거 문제 해결을 위한 실시간 추출
+- 스크롤 라운드별 새 게시글 탐지
+- 중복 방지를 위한 고유 ID 생성
+
+### 4. 간소화된 디버그 모드
+- 불필요한 스크린샷 기능 제거
+- 핵심 정보만 출력
+- 성능 최적화

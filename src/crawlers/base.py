@@ -149,19 +149,19 @@ class BaseCrawler(ABC):
         """
         pass
 
-
-def _extract_numbers_from_text(self, text: str) -> int:
-    text = text.lower().replace(",", "")
-    m = re.search(r"(\d+(?:\.\d+)?)([kKmM]?)", text)
-    if not m:
-        return 0
-    value, suffix = m.groups()
-    num = float(value)
-    if suffix == "k":
-        num *= 1_000
-    elif suffix == "m":
-        num *= 1_000_000
-    return int(num)
+    def _extract_numbers_from_text(self, text: str) -> int:
+        """텍스트에서 숫자 추출 (K, M 단위 지원)"""
+        text = text.lower().replace(",", "")
+        m = re.search(r"(\d+(?:\.\d+)?)([kKmM]?)", text)
+        if not m:
+            return 0
+        value, suffix = m.groups()
+        num = float(value)
+        if suffix == "k":
+            num *= 1_000
+        elif suffix == "m":
+            num *= 1_000_000
+        return int(num)
 
     def _clean_content(self, content: str, exclude_keywords: Optional[List[str]] = None) -> str:
         """

@@ -1,0 +1,364 @@
+---
+description:
+globs:
+alwaysApply: false
+---
+# LinkedIn 크롤러 가이드
+
+LinkedIn 플랫폼에서 게시글을 크롤링하는 시스템에 대한 종합 가이드입니다.
+
+## 📁 파일 구조
+
+### 핵심 파일들
+- [src/crawlers/linkedin.py](mdc:src/crawlers/linkedin.py) - LinkedIn 전용 크롤러 (최신 업데이트 완료)
+- [src/crawlers/base.py](mdc:src/crawlers/base.py) - 모든 크롤러의 베이스 클래스
+- [main.py](mdc:main.py) - CLI 인터페이스
+- [src/models.py](mdc:src/models.py) - 데이터 모델 정의
+
+### 설정 파일들
+- `.env` - 환경 변수 (LinkedIn 로그인 정보)
+- `data/linkedin_session.json` - Storage State 기반 세션 저장
+
+## 🌐 LinkedIn 웹사이트 구조
+
+### URL 패턴
+```
+https://www.linkedin.com/feed/ - 메인 피드
+https://www.linkedin.com/login - 로그인 페이지
+https://www.linkedin.com/uas/login - 대체 로그인 페이지
+https://www.linkedin.com/feed/update/urn:li:activity:ID/ - 개별 게시글
+https://www.linkedin.com/in/username - 개인 프로필
+https://www.linkedin.com/company/company-name - 회사 페이지
+```
+
+### DOM 구조 특성 (2025년 5월 업데이트)
+```html
+<!-- 게시글 컨테이너 (다중 선택자 시스템) -->
+<div class="feed-shared-update-v2" data-urn="update">
+  <!-- 작성자 정보 -->
+  <a href="/in/username" class="update-components-actor__meta-link">
+    <span class="update-components-actor__title">
+      <span dir="ltr" aria-hidden="true">작성자명</span>
+    </span>
+  </a>
+
+  <!-- 타임스탬프 (정규식 패턴 기반 추출) -->
+  <span class="update-components-actor__sub-description" aria-hidden="true">
+    3주 • 수정됨 • <!-- 개선된 패턴 매칭 -->
+  </span>
+
+  <!-- 게시글 콘텐츠 (더보기 확장 후) -->
+  <div class="update-components-text">
+    <span class="break-words" dir="ltr">게시글 내용...</span>
+  </div>
+
+  <!-- 더보기 버튼 (전체 페이지에서 일괄 처리) -->
+  <button class="feed-shared-inline-show-more-text__see-more-less-toggle">
+    더보기
+  </button>
+
+  <!-- 상호작용 정보 -->
+  <div class="social-details-social-counts">
+    <button data-reaction-details="" aria-label="반응 134">
+      <span>134</span> <!-- 좋아요 수 -->
+    </button>
+  </div>
+</div>
+
+<!-- 로그인 상태 확인 지표 -->
+<button aria-label="Start a post">게시글 작성</button>
+<div data-control-name="identity_welcome_message">프로필 메뉴</div>
+```
+
+## 🔄 크롤링 프로세스 흐름도
+
+```mermaid
+graph TD
+    A[시작] --> B[환경 변수 로드]
+    B --> C[Storage State 확인]
+    C --> D{세션 존재?}
+
+    D -->|Yes| E[세션 로드 시도]
+    D -->|No| F[새 페이지 로드]
+
+    E --> G{로그인 상태 확인}
+    G -->|Success| H[피드 접근 성공]
+    G -->|Failed| I[세션 만료 - 재로그인]
+
+    F --> J[피드 페이지 로드]
+    J --> K{로그인 상태?}
+    K -->|No| L[로그인 폼 처리]
+    K -->|Yes| H
+
+    L --> M[계정 정보 입력]
+    M --> N[보안 인증 처리]
+    N --> O[세션 저장]
+    O --> H
+
+    I --> L
+
+    H --> P[전체 더보기 버튼 클릭]
+    P --> Q[상단부터 게시글 추출]
+    Q --> R{목표 달성?}
+    R -->|No| S[스크롤 후 반복]
+    R -->|Yes| T[JSON 저장]
+    S --> P
+    T --> U[완료]
+```
+
+## ⚙️ 주요 설정
+
+### 환경 변수 (.env)
+```bash
+LINKEDIN_USERNAME=your_email@example.com
+LINKEDIN_PASSWORD=your_password
+LINKEDIN_SESSION_PATH=./data/linkedin_session.json
+LINKEDIN_LOGIN_TIMEOUT=30000
+LINKEDIN_LOGIN_RETRY_COUNT=3
+```
+
+### 크롤러 설정
+- **User-Agent**: Windows Chrome (데스크톱 환경)
+- **세션 관리**: Storage State 기반 (cookies + localStorage)
+- **타임아웃**: 로그인 30초, 페이지 로드 15초
+- **스크롤 제한**: 최대 5회 시도
+- **추출 방식**: 더보기 클릭 → 상단 추출
+
+## 🚨 LinkedIn 특화 문제와 해결책
+
+### 1. 더보기 버튼 처리 (핵심 개선사항)
+**문제**: 게시글별 더보기 버튼을 개별 처리하면 비효율적
+
+**해결책**:
+```python
+# 1단계: 페이지 전체의 더보기 버튼 모두 클릭
+await self._expand_all_posts_on_page(page)
+
+# 2단계: 상단에서부터 순차적으로 게시글 추출
+current_posts = await self._collect_expanded_posts(page, target_count)
+```
+
+### 2. 타임스탬프 추출 문제 (최근 해결)
+**문제**: 전체 콘텐츠가 타임스탬프로 추출되는 오류
+
+**해결책**: 정규식 패턴 기반 추출
+```python
+time_patterns = [
+    r'(\d+분\s*[•·]?)',      # "30분 •"
+    r'(\d+시간\s*[•·]?)',     # "2시간 •"
+    r'(\d+일\s*[•·]?)',      # "3일 •"
+    r'(\d+주\s*[•·]?)',      # "2주 •"
+    r'(\d+개월\s*[•·]?)',    # "3개월 •"
+    r'(\d+년\s*[•·]?)',      # "1년 •"
+    r'(현재\s*시간)',        # "현재 시간"
+]
+```
+
+### 3. 보안 인증 단계
+**문제**: 이메일 인증, "Trust this browser" 등 추가 단계
+
+**해결책**:
+```python
+async def _handle_security_challenges(self, page):
+    # 이메일 인증 코드 입력
+    verification_input = await page.query_selector('input[name="pin"]')
+    if verification_input:
+        verification_code = typer.prompt("LinkedIn 인증 코드 입력")
+        await verification_input.fill(verification_code)
+
+    # "Trust this browser" 처리
+    trust_button = await page.query_selector('button:has-text("Trust this browser")')
+    if trust_button:
+        await trust_button.click()
+```
+
+### 4. 다중 선택자 시스템
+**문제**: LinkedIn의 복잡한 CSS 클래스 구조
+
+**해결책**: 우선순위 기반 선택자
+```python
+post_selectors = [
+    ".feed-shared-update-v2[data-urn]",      # 1순위: data 속성
+    '[data-id*="urn:li:activity:"]',         # 2순위: activity ID
+    ".feed-shared-update-v2",                # 3순위: 클래스
+    '[data-urn*="update"]',                  # 4순위: urn 속성
+]
+```
+
+## 🔧 코드 수정 가이드
+
+### 타임스탬프 추출 로직 수정
+```python
+def _extract_time_from_text(self, text: str) -> str:
+    # 1. 정규식 패턴 매칭
+    for pattern in time_patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            time_part = match.group(1).strip()
+            if '수정됨' in text:
+                return f"{time_part} • 수정됨 •"
+            return f"{time_part} •"
+
+    # 2. 길이 제한 (30자 이하만 인정)
+    if len(first_sentence) < 30:
+        return cleaned_text
+```
+
+### 상호작용 추출 개선
+```python
+async def _extract_interactions_progressive(self, element):
+    interactions = {"likes": None, "comments": None, "shares": None}
+
+    # social-details-social-counts 영역에서 추출
+    social_counts = await element.query_selector(".social-details-social-counts")
+
+    if social_counts:
+        # 좋아요/반응 수
+        reactions_button = await social_counts.query_selector("button[data-reaction-details]")
+
+        # 댓글 수
+        comments_button = await social_counts.query_selector('button[aria-label*="댓글"]')
+
+        # 공유 수 (퍼감)
+        shares_elements = await social_counts.query_selector_all('span:has-text("퍼감")')
+```
+
+### 점진적 게시글 수집
+```python
+async def _progressive_post_collection(self, page, target_count):
+    posts = []
+    scroll_attempts = 0
+
+    while len(posts) < target_count and scroll_attempts < self.max_scroll_attempts:
+        # 1단계: 전체 더보기 버튼 클릭
+        await self._expand_all_posts_on_page(page)
+
+        # 2단계: 상단부터 순차 추출
+        current_posts = await self._collect_expanded_posts(page, target_count)
+
+        # 3단계: 중복 제거 및 추가
+        for post_data in current_posts:
+            if not self._is_duplicate(post_data, posts):
+                posts.append(Post(platform="linkedin", **post_data))
+
+        # 4단계: 스크롤 (필요시)
+        if len(posts) < target_count:
+            await self._scroll_for_more_posts(page)
+            scroll_attempts += 1
+```
+
+## 📈 성능 최적화
+
+### 추출 효율성 개선
+1. **더보기 일괄 처리**: 개별 처리 → 전체 일괄 처리로 속도 향상
+2. **상단 우선 추출**: DOM 순서대로 추출하여 안정성 확보
+3. **스마트 스크롤**: 새 게시글이 없으면 스크롤 시도
+
+### 메모리 최적화
+1. **즉시 처리**: 게시글별 실시간 Post 객체 생성
+2. **중복 방지**: URL 및 콘텐츠 기반 중복 검사
+3. **선택적 추출**: 유효하지 않은 게시글 조기 필터링
+
+## 🎯 LinkedIn 크롤러 특이사항
+
+### 1. 기업 vs 개인 게시글 구분
+```python
+# 개인 프로필: /in/username
+author_link = await element.query_selector('a[href*="/in/"]')
+
+# 회사 페이지: /company/company-name
+company_link = await element.query_selector('a[href*="/company/"]')
+```
+
+### 2. 콘텐츠 정리 시스템
+```python
+def _clean_linkedin_content(self, content: str) -> str:
+    exclude_keywords = [
+        "like", "comment", "share", "repost",
+        "추천", "댓글", "퍼가기", "팔로워",
+        "1촌", "2촌", "3촌", "linkedin"
+    ]
+    # UI 요소 제거 후 실제 콘텐츠만 반환
+```
+
+### 3. 게시글 유효성 검증
+```python
+def _is_valid_post(self, post_data: Dict[str, Any]) -> bool:
+    content = post_data.get("content")
+    author = post_data.get("author")
+
+    return bool(
+        content and len(str(content).strip()) > 15 and
+        author and str(author) != "Unknown"
+    )
+```
+
+### 4. URL 구조 처리
+```python
+# data-id에서 URN 추출
+if "urn:li:activity:" in data_id:
+    activity_id = data_id.split("urn:li:activity:")[-1]
+    return f"https://www.linkedin.com/feed/update/urn:li:activity:{activity_id}/"
+```
+
+## 🚀 실행 가이드
+
+### 첫 실행 (계정 설정)
+```bash
+# 환경 설정
+cp .env.example .env
+# .env 파일에 LinkedIn 계정 정보 입력
+
+# 첫 크롤링 (로그인 필요)
+python main.py linkedin --count 5
+```
+
+### 정기 실행 (세션 재사용)
+```bash
+# 일반 모드 (빠른 실행)
+python main.py linkedin --count 20
+
+# 출력 파일 지정
+python main.py linkedin --count 10 --output my_linkedin.json
+```
+
+### 트러블슈팅
+```bash
+# 세션 초기화 (로그인 문제 시)
+rm data/linkedin_session.json
+
+# 타임스탬프 추출 확인
+python main.py linkedin --count 3 | grep "timestamp"
+
+# 더보기 버튼 클릭 확인
+python main.py linkedin --count 5 | grep "더보기 버튼"
+```
+
+## 🔧 핵심 기술 혁신 (2025년 5월)
+
+### 1. 효율적인 더보기 처리
+- **Before**: 게시글별 개별 더보기 클릭
+- **After**: 페이지 전체 일괄 클릭 → 상단부터 추출
+
+### 2. 정규식 기반 타임스탭프 추출
+- **Before**: 전체 텍스트가 타임스탬프로 추출되는 오류
+- **After**: 패턴 매칭으로 정확한 시간 정보만 추출
+
+### 3. Storage State 세션 관리
+- **쿠키 + localStorage** 모두 저장하여 안정적인 세션 유지
+- 로그인 상태 자동 확인 및 복구
+
+### 4. 다중 선택자 Fallback 시스템
+- DOM 구조 변경에 강건한 선택자 우선순위 적용
+- data 속성 → aria-label → 클래스 → 구조적 관계 순서
+
+## 💡 LinkedIn vs Threads 비교
+
+| 특징 | LinkedIn | Threads |
+|---|---|---|
+| 로그인 방식 | LinkedIn 직접 | Instagram 연동 |
+| 더보기 처리 | 일괄 클릭 방식 | 개별 처리 |
+| 타임스탬프 | 정규식 추출 | DOM 구조 기반 |
+| 상호작용 | 3종류 (likes, comments, shares) | 4종류 (likes, comments, reposts, shares) |
+| 세션 관리 | Storage State | Storage State |
+| DOM 안정성 | 높음 (data 속성) | 보통 (클래스 기반) |
