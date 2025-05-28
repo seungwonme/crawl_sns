@@ -42,6 +42,7 @@ class Post(BaseModel):
         comments (Optional[int]): 댓글 수
         reposts (Optional[int]): 리포스트 수
         shares (Optional[int]): 공유/리포스트 수
+        views (Optional[int]): 조회수 (X 등 지원 플랫폼만)
     """
 
     platform: str
@@ -53,6 +54,7 @@ class Post(BaseModel):
     comments: Optional[int] = None
     reposts: Optional[int] = None
     shares: Optional[int] = None
+    views: Optional[int] = None
 
     class Config:
         extra = "allow"  # 플랫폼별 추가 필드 허용
