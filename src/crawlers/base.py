@@ -24,6 +24,8 @@
 @see {@link /docs/crawler-architecture.md} - 크롤러 아키텍처 문서
 """
 
+import asyncio
+import re
 from abc import ABC, abstractmethod
 from typing import List, Optional
 
@@ -41,7 +43,13 @@ class BaseCrawler(ABC):
     공통 브라우저 관리 기능과 크롤링 인터페이스를 제공합니다.
     """
 
-    def __init__(self, platform_name: str, base_url: str, user_agent: Optional[str] = None):
+    def __init__(
+        self,
+        platform_name: str,
+        base_url: str,
+        user_agent: Optional[str] = None,
+        debug_mode: bool = False,
+    ):
         """
         베이스 크롤러 초기화
 
@@ -49,10 +57,12 @@ class BaseCrawler(ABC):
             platform_name (str): 플랫폼 이름 (예: threads, linkedin)
             base_url (str): 플랫폼 기본 URL
             user_agent (Optional[str]): 사용할 User-Agent 문자열
+            debug_mode (bool): 디버그 모드 활성화 여부
         """
         self.platform_name = platform_name
         self.base_url = base_url
         self.user_agent = user_agent or self._get_default_user_agent()
+        self.debug_mode = debug_mode
 
     def _get_default_user_agent(self) -> str:
         """플랫폼별 기본 User-Agent 반환"""
@@ -71,10 +81,20 @@ class BaseCrawler(ABC):
         posts = []
 
         try:
-            typer.echo(f"🔄 {self.platform_name} 크롤링을 시작합니다... (게시글 {count}개)")
+            if self.debug_mode:
+                typer.echo(
+                    f"🐛 디버그 모드로 {self.platform_name} 크롤링을 시작합니다... (게시글 {count}개)"
+                )
+                typer.echo("   - 브라우저 창이 표시됩니다")
+            else:
+                typer.echo(f"🔄 {self.platform_name} 크롤링을 시작합니다... (게시글 {count}개)")
 
             async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=False)
+                # 항상 브라우저 창 표시 (일반 모드, 디버그 모드 모두)
+                browser = await p.chromium.launch(
+                    headless=False,  # 항상 브라우저 창 표시
+                    devtools=self.debug_mode,  # 디버그 모드에서만 개발자 도구 열기
+                )
 
                 context = await browser.new_context(user_agent=self.user_agent)
                 page = await context.new_page()
@@ -82,16 +102,36 @@ class BaseCrawler(ABC):
                 try:
                     posts = await self._crawl_implementation(page, count)
                 finally:
+                    if self.debug_mode:
+                        typer.echo(
+                            "🐛 디버그 모드: 브라우저를 수동으로 닫으세요 (완료 후 Enter를 누르면 자동 종료)"
+                        )
+                        try:
+                            # 사용자가 Enter를 누를 때까지 대기 (5분 타임아웃)
+                            await asyncio.wait_for(asyncio.to_thread(input), timeout=300)
+                        except asyncio.TimeoutError:
+                            typer.echo("⏰ 5분 타임아웃 - 브라우저를 자동으로 닫습니다")
+                        except:
+                            pass
                     await browser.close()
 
             typer.echo(f"📊 총 {len(posts)}개의 게시글을 추출했습니다.")
 
             if not posts:
                 typer.echo(f"❌ 게시글을 추출하지 못했습니다.")
-                typer.echo(f"💡 힌트: {self.platform_name}은(는) 로그인이 필요할 수 있습니다.")
+                if self.debug_mode:
+                    typer.echo(f"💡 디버그 힌트:")
+                    typer.echo(f"   - 브라우저에서 직접 확인해보세요")
+                    typer.echo(f"   - 네트워크 연결 상태를 점검하세요")
+                    typer.echo(f"   - 플랫폼 접근 권한을 확인하세요")
+                else:
+                    typer.echo(f"💡 힌트: {self.platform_name}은(는) 로그인이 필요할 수 있습니다.")
+                    typer.echo(f"   디버그 모드로 다시 실행해보세요: --debug")
 
         except Exception as e:
             typer.echo(f"❌ 크롤링 중 오류 발생: {e}")
+            if self.debug_mode:
+                typer.echo(f"🐛 디버그 정보: {e}")
 
         return posts
 
@@ -109,10 +149,19 @@ class BaseCrawler(ABC):
         """
         pass
 
-    def _extract_numbers_from_text(self, text: str) -> int:
-        """텍스트에서 숫자 추출 (좋아요, 댓글 수 등)"""
-        numbers = "".join(filter(str.isdigit, text))
-        return int(numbers) if numbers else 0
+
+def _extract_numbers_from_text(self, text: str) -> int:
+    text = text.lower().replace(",", "")
+    m = re.search(r"(\d+(?:\.\d+)?)([kKmM]?)", text)
+    if not m:
+        return 0
+    value, suffix = m.groups()
+    num = float(value)
+    if suffix == "k":
+        num *= 1_000
+    elif suffix == "m":
+        num *= 1_000_000
+    return int(num)
 
     def _clean_content(self, content: str, exclude_keywords: Optional[List[str]] = None) -> str:
         """

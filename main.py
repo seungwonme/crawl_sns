@@ -31,27 +31,17 @@ from typing import List, Optional
 
 import typer
 from playwright.async_api import async_playwright
-from pydantic import BaseModel
+
+# Import crawler and models
+from src.crawlers.threads import ThreadsCrawler
+from src.models import Post
 
 # === Version ===
 __version__ = "0.1.0"
 
 
 # === Data Models ===
-class Post(BaseModel):
-    """SNS 게시글 데이터 모델"""
-
-    platform: str
-    author: str
-    content: str
-    timestamp: str
-    url: Optional[str] = None
-    likes: Optional[int] = None
-    comments: Optional[int] = None
-    shares: Optional[int] = None
-
-    class Config:
-        extra = "allow"  # 플랫폼별 추가 필드 허용
+# Post 모델은 src.models에서 import하여 사용
 
 
 # === Core Functions ===
@@ -71,271 +61,6 @@ def save_posts_to_file(posts: List[Post], filepath: str) -> None:
 
 
 # === Platform Crawlers ===
-async def crawl_threads(count: int = 5) -> List[Post]:
-    """
-    Playwright를 사용하여 Threads에서 게시글을 크롤링합니다.
-    """
-    posts = []
-
-    try:
-        typer.echo(f"🧵 Threads 크롤링을 시작합니다... (게시글 {count}개)")
-
-        async with async_playwright() as p:
-            # 브라우저 실행
-            browser = await p.chromium.launch(headless=False)
-
-            # User-Agent를 포함한 컨텍스트 생성
-            context = await browser.new_context(
-                user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
-            )
-
-            page = await context.new_page()
-
-            # Threads 메인 페이지로 이동
-            await page.goto("https://threads.net", wait_until="networkidle")
-            typer.echo(f"✅ 페이지 로드 성공")
-
-            # 페이지 로드 추가 대기 (3초)
-            await page.wait_for_timeout(3000)
-
-            # DOM 구조 분석에 따른 게시글 컨테이너 찾기
-            # Column body 영역 내의 게시글들을 찾기
-            column_body = await page.query_selector(
-                '[data-pressable-container="true"], [aria-label="Column body"], region[role] >> text=Column body'
-            )
-
-            if not column_body:
-                # 대안: 홈 피드 영역 찾기
-                column_body = await page.query_selector('div[style*="flex"]')
-
-            post_elements = []
-            if column_body:
-                # Column body 내의 직접적인 게시글 컨테이너들 찾기
-                post_elements = await column_body.query_selector_all(
-                    'div[style*="cursor: pointer"] >> xpath=..'
-                )
-
-            # 만약 위의 방법이 실패하면 다른 방식으로 시도
-            if not post_elements:
-                # 게시글 링크 패턴을 이용해 찾기
-                post_links = await page.query_selector_all('a[href*="/@"][href*="/post/"]')
-                typer.echo(f"🔗 {len(post_links)}개의 게시글 링크를 찾았습니다")
-
-                # 각 링크의 최상위 컨테이너 찾기
-                containers = []
-                for link in post_links[: count * 2]:  # 여유있게 더 많이 수집
-                    try:
-                        # 상위 4단계까지 올라가서 게시글 컨테이너 찾기
-                        container = await link.evaluate_handle(
-                            """(element) => {
-                            let current = element;
-                            for (let i = 0; i < 6; i++) {
-                                if (current.parentElement) {
-                                    current = current.parentElement;
-                                    // 게시글 컨테이너로 보이는 조건들
-                                    if (current.querySelector('a[href*="/@"]') &&
-                                        current.querySelector('time') &&
-                                        current.textContent && current.textContent.length > 20) {
-                                        return current;
-                                    }
-                                }
-                            }
-                            return null;
-                        }"""
-                        )
-
-                        if container:
-                            element = container.as_element()
-                            if element and element not in containers:
-                                containers.append(element)
-
-                    except Exception as e:
-                        continue
-
-                post_elements = containers[:count]
-
-            typer.echo(f"🔍 {len(post_elements)}개의 게시글 컨테이너를 찾았습니다")
-
-            # 게시글 데이터 추출
-            for i, element in enumerate(post_elements[:count]):
-                try:
-                    # 작성자 정보 추출 - 더 정확한 선택자 사용
-                    author_link = await element.query_selector(
-                        'a[href^="/@"]:not([href*="/post/"])'
-                    )
-                    author = "Unknown"
-                    if author_link:
-                        href = await author_link.get_attribute("href")
-                        if href and href.startswith("/@"):
-                            author = href.replace("/@", "").split("/")[0]
-
-                    # 게시글 URL 추출
-                    post_url_element = await element.query_selector('a[href*="/post/"]')
-                    post_url = None
-                    if post_url_element:
-                        href = await post_url_element.get_attribute("href")
-                        if href:
-                            post_url = (
-                                f"https://threads.net{href}"
-                                if not href.startswith("http")
-                                else href
-                            )
-
-                    # 게시 시간 추출
-                    time_element = await element.query_selector("time")
-                    timestamp = "알 수 없음"
-                    if time_element:
-                        time_text = await time_element.inner_text()
-                        if time_text:
-                            timestamp = time_text.strip()
-
-                    # 콘텐츠 추출 - 실제 DOM 구조에 맞춰 개선
-                    content_text = ""
-
-                    # 방법 1: 텍스트가 많은 div 요소들 찾기
-                    content_divs = await element.query_selector_all("div")
-                    content_texts = []
-
-                    for div in content_divs:
-                        try:
-                            text = await div.inner_text()
-                            if text and len(text.strip()) > 15:  # 충분히 긴 텍스트만
-                                # 작성자명, 시간, 버튼 텍스트 등 제외
-                                if not any(
-                                    exclude in text.lower()
-                                    for exclude in [
-                                        "like",
-                                        "comment",
-                                        "repost",
-                                        "share",
-                                        "more",
-                                        "translate",
-                                        "ago",
-                                        author.lower() if author != "Unknown" else "",
-                                    ]
-                                ):
-                                    content_texts.append(text.strip())
-                        except:
-                            continue
-
-                    # 가장 긴 텍스트를 메인 콘텐츠로 선택
-                    if content_texts:
-                        content_text = max(content_texts, key=len)
-
-                    # 방법 2: 만약 위에서 실패하면 전체 텍스트에서 추출
-                    if not content_text or len(content_text) < 20:
-                        full_text = await element.inner_text()
-                        if full_text:
-                            lines = full_text.split("\n")
-                            for line in lines:
-                                line = line.strip()
-                                if (
-                                    len(line) > 20
-                                    and not any(
-                                        exclude in line.lower()
-                                        for exclude in [
-                                            "like",
-                                            "comment",
-                                            "repost",
-                                            "share",
-                                            "more",
-                                            "ago",
-                                        ]
-                                    )
-                                    and not line.isdigit()
-                                ):
-                                    content_text = line
-                                    break
-
-                    # 상호작용 정보 추출 - 실제 버튼 텍스트 분석
-                    likes = 0
-                    comments = 0
-                    reposts = 0
-                    shares = 0
-
-                    # Like 버튼 찾기
-                    like_buttons = await element.query_selector_all('button:has-text("Like")')
-                    for btn in like_buttons:
-                        try:
-                            text = await btn.inner_text()
-                            # "Like 201" 패턴에서 숫자 추출
-                            numbers = "".join(filter(str.isdigit, text))
-                            if numbers:
-                                likes = int(numbers)
-                        except:
-                            pass
-
-                    # Comment 버튼 찾기
-                    comment_buttons = await element.query_selector_all('button:has-text("Comment")')
-                    for btn in comment_buttons:
-                        try:
-                            text = await btn.inner_text()
-                            numbers = "".join(filter(str.isdigit, text))
-                            if numbers:
-                                comments = int(numbers)
-                        except:
-                            pass
-
-                    # Repost 버튼 찾기
-                    repost_buttons = await element.query_selector_all('button:has-text("Repost")')
-                    for btn in repost_buttons:
-                        try:
-                            text = await btn.inner_text()
-                            numbers = "".join(filter(str.isdigit, text))
-                            if numbers:
-                                reposts = int(numbers)
-                        except:
-                            pass
-
-                    # Share 버튼 찾기
-                    share_buttons = await element.query_selector_all('button:has-text("Share")')
-                    for btn in share_buttons:
-                        try:
-                            text = await btn.inner_text()
-                            numbers = "".join(filter(str.isdigit, text))
-                            if numbers:
-                                shares = int(numbers)
-                        except:
-                            pass
-
-                    # 유효한 게시글인지 확인 - 조건 완화
-                    if content_text and len(content_text.strip()) > 10 and author != "Unknown":
-                        post = Post(
-                            platform="threads",
-                            author=author,
-                            content=content_text[:500],  # 길이 제한
-                            timestamp=timestamp,
-                            url=post_url,
-                            likes=likes if likes > 0 else None,
-                            comments=comments if comments > 0 else None,
-                            shares=shares if shares > 0 else None,
-                        )
-                        posts.append(post)
-                        typer.echo(f"   ✅ 게시글 {len(posts)}: @{author} - {content_text[:50]}...")
-                    else:
-                        typer.echo(
-                            f"   ⚠️  게시글 {i+1}: 데이터 부족 - author={author}, content_len={len(content_text) if content_text else 0}"
-                        )
-
-                except Exception as e:
-                    typer.echo(f"   ❌ 게시글 {i+1} 파싱 중 오류: {e}")
-                    continue
-
-            await browser.close()
-            typer.echo(f"📊 총 {len(posts)}개의 게시글을 추출했습니다.")
-
-            # 만약 추출된 게시글이 없다면 디버그 정보 제공
-            if not posts:
-                typer.echo(f"❌ 게시글을 추출하지 못했습니다.")
-                typer.echo(f"💡 힌트: Threads는 로그인이 필요할 수 있습니다.")
-                typer.echo(
-                    f"💡 현재 {len(post_elements)}개의 요소를 분석했지만 유효한 데이터를 찾지 못했습니다."
-                )
-
-    except Exception as e:
-        typer.echo(f"❌ 크롤링 중 오류 발생: {e}")
-
-    return posts
 
 
 async def crawl_linkedin(count: int = 5) -> List[Post]:
@@ -736,6 +461,9 @@ def threads(
     output: Optional[str] = typer.Option(
         None, "--output", "-o", help="출력 파일명 (기본: 자동 생성)"
     ),
+    debug: bool = typer.Option(
+        False, "--debug", "-d", help="디버그 모드 활성화 (브라우저 표시, 상세 로그, 스크린샷)"
+    ),
 ):
     """
     Threads에서 게시글을 크롤링합니다.
@@ -743,14 +471,29 @@ def threads(
     예시:
     python main.py threads --count 10
     python main.py threads -c 3 -o my_threads.json
+    python main.py threads --debug  # 디버그 모드로 실행
     """
-    typer.echo(f"🧵 Threads 크롤링을 시작합니다... (게시글 {count}개)")
+    if debug:
+        typer.echo(f"🐛 디버그 모드로 Threads 크롤링을 시작합니다... (게시글 {count}개)")
+        typer.echo("   - 브라우저가 표시됩니다")
+        typer.echo("   - 상세한 로그와 스크린샷이 저장됩니다")
+        typer.echo("   - 각 단계에서 사용자 입력을 기다릴 수 있습니다")
+    else:
+        typer.echo(f"🧵 Threads 크롤링을 시작합니다... (게시글 {count}개)")
 
-    # 비동기 함수 실행
-    posts = asyncio.run(crawl_threads(count))
+    # ThreadsCrawler 클래스에 debug_mode 전달
+    crawler = ThreadsCrawler(debug_mode=debug)
+    posts = asyncio.run(crawler.crawl(count))
 
     if not posts:
         typer.echo("❌ 크롤링된 게시글이 없습니다.")
+        if debug:
+            typer.echo("💡 디버그 정보:")
+            typer.echo("   - data/debug_screenshots/ 폴더의 스크린샷을 확인해보세요")
+            typer.echo(
+                "   - 환경 변수 THREADS_USERNAME, THREADS_PASSWORD가 설정되었는지 확인하세요"
+            )
+            typer.echo("   - 로그 메시지에서 오류 원인을 찾아보세요")
         raise typer.Exit(1)
 
     # 출력 파일명 생성
@@ -769,6 +512,8 @@ def threads(
     typer.echo(f"   - 플랫폼: Threads")
     typer.echo(f"   - 수집된 게시글: {len(posts)}개")
     typer.echo(f"   - 저장 위치: {output}")
+    if debug:
+        typer.echo(f"   - 디버그 스크린샷: data/debug_screenshots/")
 
     # 첫 번째 게시글 미리보기
     if posts:
