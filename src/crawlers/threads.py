@@ -128,15 +128,13 @@ class ThreadsCrawler(BaseCrawler):
         # 페이지 로드 추가 대기
         await page.wait_for_timeout(3000)
 
-        # 게시글 요소 찾기
-        post_elements = await self._find_post_elements(page, count)
-        typer.echo(f"🔍 {len(post_elements)}개의 게시글 컨테이너를 찾았습니다")
+        # 점진적 게시글 추출 (스크롤 중 DOM 요소 제거 문제 해결)
+        post_elements = await self._extract_posts_incrementally(page, count)
+        typer.echo(f"🔍 총 {len(post_elements)}개의 게시글을 수집했습니다")
 
         # 각 게시글에서 데이터 추출
-        for i, element in enumerate(post_elements[:count]):
+        for i, post_data in enumerate(post_elements[:count]):
             try:
-                post_data = await self._extract_post_data(element)
-
                 if self._is_valid_post(post_data):
                     post = Post(platform="threads", **post_data)
                     posts.append(post)
@@ -665,6 +663,157 @@ class ThreadsCrawler(BaseCrawler):
                 typer.echo(f"오류 메시지 추출 중 문제: {e}")
             return None
 
+    async def _extract_posts_incrementally(
+        self, page: Page, target_count: int
+    ) -> List[Dict[str, Any]]:
+        """
+        점진적 게시글 추출 - 스크롤 중 DOM 요소 제거 문제 해결
+
+        Args:
+            page (Page): Playwright 페이지 객체
+            target_count (int): 목표 게시글 수
+
+        Returns:
+            List[Dict[str, Any]]: 추출된 게시글 데이터 목록
+        """
+        all_posts = []
+        extracted_urls = set()  # 중복 방지용
+        max_scroll_attempts = 15  # 스크롤 시도 횟수 증가
+        no_new_posts_count = 0  # 새로운 게시글이 없는 연속 횟수
+
+        typer.echo(f"🔄 점진적 추출 시작 - 목표: {target_count}개")
+
+        for scroll_round in range(max_scroll_attempts):
+            typer.echo(f"📜 스크롤 라운드 {scroll_round + 1}")
+
+            # 현재 화면의 게시글 요소들 찾기
+            current_elements = await self._find_current_post_elements(page)
+            typer.echo(f"   현재 DOM에서 {len(current_elements)}개 요소 발견")
+
+            # 현재 요소들에서 데이터 추출
+            new_posts_in_round = 0
+            for element in current_elements:
+                try:
+                    post_data = await self._extract_post_data(element)
+
+                    # 중복 체크 (URL 또는 작성자+콘텐츠 조합)
+                    post_id = self._generate_post_id(post_data)
+                    if post_id not in extracted_urls:
+                        if self._is_valid_post(post_data):
+                            all_posts.append(post_data)
+                            extracted_urls.add(post_id)
+                            new_posts_in_round += 1
+
+                            if self.debug_mode:
+                                typer.echo(
+                                    f"   ✅ 새 게시글 {len(all_posts)}: @{post_data.get('author')} - {post_data.get('content', '')[:30]}..."
+                                )
+
+                            # 목표 달성 시 조기 종료
+                            if len(all_posts) >= target_count:
+                                typer.echo(f"🎯 목표 달성! {len(all_posts)}개 수집 완료")
+                                return all_posts
+                except Exception as e:
+                    if self.debug_mode:
+                        typer.echo(f"   ⚠️ 게시글 처리 중 오류: {e}")
+                    continue
+
+            typer.echo(
+                f"   ➕ 이번 라운드에서 {new_posts_in_round}개 새 게시글 추가 (총 {len(all_posts)}개)"
+            )
+
+            # 새로운 게시글이 없으면 카운트 증가
+            if new_posts_in_round == 0:
+                no_new_posts_count += 1
+                if no_new_posts_count >= 3:
+                    typer.echo(f"⏹️ 3라운드 연속 새 게시글 없음 - 추출 종료")
+                    break
+            else:
+                no_new_posts_count = 0  # 새 게시글이 있으면 카운트 리셋
+
+            # 목표에 충분히 가까우면 종료
+            if len(all_posts) >= target_count * 0.9:  # 90% 이상 달성
+                typer.echo(f"🏁 목표의 90% 달성 - 추출 종료")
+                break
+
+            # 다음 스크롤을 위한 대기 및 스크롤
+            if scroll_round < max_scroll_attempts - 1:  # 마지막 라운드가 아니면 스크롤
+                await self._perform_scroll(page)
+                await page.wait_for_timeout(3000)  # 스크롤 후 로딩 대기
+
+        typer.echo(f"📊 점진적 추출 완료: {len(all_posts)}개 게시글 수집")
+        return all_posts
+
+    async def _find_current_post_elements(self, page: Page) -> List[Any]:
+        """현재 DOM에 있는 게시글 요소들을 찾습니다."""
+        try:
+            # 주요 패턴들로 게시글 컨테이너 찾기
+            post_containers = await page.query_selector_all("div.x78zum5.xdt5ytf")
+
+            if not post_containers:
+                # 대안 패턴
+                post_containers = await page.query_selector_all(
+                    'div[data-pressable-container="true"]'
+                )
+
+            if not post_containers:
+                # 게시글 링크 기반으로 상위 컨테이너 찾기
+                post_links = await page.query_selector_all('a[href*="/@"][href*="/post/"]')
+                containers = []
+                for link in post_links:
+                    try:
+                        container = await link.evaluate_handle(
+                            """(element) => {
+                                let current = element;
+                                for (let i = 0; i < 6; i++) {
+                                    if (current.parentElement) {
+                                        current = current.parentElement;
+                                        if (current.querySelector('a[href*="/@"]:not([href*="/post/"])') &&
+                                            current.textContent && current.textContent.length > 50) {
+                                            return current;
+                                        }
+                                    }
+                                }
+                                return null;
+                            }"""
+                        )
+                        if container:
+                            element = container.as_element()
+                            if element and element not in containers:
+                                containers.append(element)
+                    except Exception:
+                        continue
+                post_containers = containers
+
+            return post_containers
+
+        except Exception as e:
+            typer.echo(f"⚠️ 현재 게시글 요소 찾기 실패: {e}")
+            return []
+
+    async def _perform_scroll(self, page: Page) -> None:
+        """스크롤을 수행합니다."""
+        try:
+            # 맨 끝으로 바로 스크롤 (더 효율적)
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+
+            # 스크롤 완료 대기
+            await page.wait_for_timeout(2000)
+
+        except Exception as e:
+            typer.echo(f"⚠️ 스크롤 수행 중 오류: {e}")
+
+    def _generate_post_id(self, post_data: Dict[str, Any]) -> str:
+        """게시글의 고유 ID를 생성합니다 (중복 체크용)."""
+        # URL이 있으면 URL 사용
+        if post_data.get("url"):
+            return post_data["url"]
+
+        # URL이 없으면 작성자 + 콘텐츠 조합
+        author = post_data.get("author", "")
+        content = post_data.get("content", "")
+        return f"{author}:{content[:100]}"  # 첫 100자로 제한
+
     async def _find_post_elements(self, page: Page, count: int) -> List[Any]:
         """실제 HTML 구조 기반으로 게시글 DOM 요소들을 찾습니다."""
         post_elements = []
@@ -726,49 +875,88 @@ class ThreadsCrawler(BaseCrawler):
                 post_containers = containers
 
             # 각 후보 컨테이너 검증
+            valid_containers = []
             for container_candidate in post_containers:
                 try:
                     # 피드백 분석: 실제 게시글인지 확인 (작성자, 시간, 콘텐츠)
+
+                    # 1. 작성자 확인 (링크 또는 텍스트에서)
+                    has_author = False
                     author_link = await container_candidate.query_selector(
                         'a[href*="/@"]:not([href*="/post/"])'
                     )
-                    time_element = await container_candidate.query_selector("time[datetime]")
+                    if author_link:
+                        has_author = True
+                    else:
+                        # 텍스트에서 작성자명 패턴 확인
+                        text = await container_candidate.inner_text()
+                        if text and re.search(
+                            r"^[a-zA-Z0-9_.]+$", text.split("\n")[0] if text.split("\n") else ""
+                        ):
+                            has_author = True
 
-                    # 콘텐츠 확인 (피드백의 클래스 패턴 활용)
+                    # 2. 시간 정보 확인
+                    time_element = await container_candidate.query_selector("time[datetime]")
+                    has_time = time_element is not None
+
+                    # 시간이 없다면 텍스트에서 시간 패턴 확인
+                    if not has_time:
+                        text = await container_candidate.inner_text()
+                        if text and re.search(r"\d+[hdmws]|\d+\s?(시간|분|일|주)", text):
+                            has_time = True
+
+                    # 3. 콘텐츠 확인 (최소한의 텍스트)
+                    has_content = False
                     content_spans = await container_candidate.query_selector_all(
                         'span[class*="xi7mnp6"]'
                     )
-                    has_content = len(content_spans) > 0
+                    if len(content_spans) > 0:
+                        has_content = True
+                    else:
+                        # 전체 텍스트 길이로 판단
+                        text = await container_candidate.inner_text()
+                        if (
+                            text and len(text.strip()) > 50
+                        ):  # 50자 이상의 텍스트가 있으면 콘텐츠로 간주
+                            has_content = True
 
-                    if author_link and time_element and has_content:
+                    # 4. 기본 조건 확인
+                    if has_author and (has_time or has_content):
                         # 중복 방지
                         is_duplicate = False
-                        for existing in post_elements:
+                        for existing in valid_containers:
                             try:
-                                # 간단한 중복 체크: URL이 같은지 확인
-                                existing_link = await existing.query_selector('a[href*="/post/"]')
-                                current_link = await container_candidate.query_selector(
-                                    'a[href*="/post/"]'
-                                )
-                                if existing_link and current_link:
-                                    existing_href = await existing_link.get_attribute("href")
-                                    current_href = await current_link.get_attribute("href")
-                                    if existing_href == current_href:
+                                existing_text = await existing.inner_text()
+                                current_text = await container_candidate.inner_text()
+
+                                # 텍스트 유사도로 중복 체크 (첫 100자 비교)
+                                if existing_text and current_text:
+                                    existing_sample = existing_text[:100].strip()
+                                    current_sample = current_text[:100].strip()
+                                    if existing_sample == current_sample:
                                         is_duplicate = True
                                         break
                             except:
                                 continue
 
                         if not is_duplicate:
-                            post_elements.append(container_candidate)
-                            typer.echo(f"   ✅ 유효한 게시글 {len(post_elements)} 추가")
+                            valid_containers.append(container_candidate)
+                            if self.debug_mode:
+                                typer.echo(
+                                    f"   ✅ 유효한 게시글 {len(valid_containers)} 추가 (작성자:{has_author}, 시간:{has_time}, 콘텐츠:{has_content})"
+                                )
+                            else:
+                                typer.echo(f"   ✅ 유효한 게시글 {len(valid_containers)} 추가")
 
-                    if len(post_elements) >= count:
+                    if len(valid_containers) >= count:
                         break
 
                 except Exception as e:
-                    typer.echo(f"   ⚠️ 컨테이너 검증 중 오류: {e}")
+                    if self.debug_mode:
+                        typer.echo(f"   ⚠️ 컨테이너 검증 중 오류: {e}")
                     continue
+
+            post_elements = valid_containers
 
         except Exception as e:
             typer.echo(f"❌ 게시글 요소 찾기 중 오류: {e}")
@@ -787,10 +975,12 @@ class ThreadsCrawler(BaseCrawler):
             target_count (int): 목표 게시글 수
         """
         try:
-            for scroll_attempt in range(3):  # 최대 3번 스크롤
+            max_scrolls = 10
+
+            for scroll_attempt in range(max_scrolls):
                 # 페이지 맨 아래로 스크롤
                 await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                await page.wait_for_timeout(2000)
+                await page.wait_for_timeout(3000)  # 로딩 대기 시간 증가
 
                 # 현재 로드된 게시글 수 확인 (실제 HTML 구조 기반)
                 current_posts = await page.query_selector_all("div.x78zum5.xdt5ytf")
@@ -802,8 +992,22 @@ class ThreadsCrawler(BaseCrawler):
 
                 typer.echo(f"   스크롤 {scroll_attempt + 1}: {len(current_posts)}개 게시글 로드됨")
 
-                if len(current_posts) >= target_count * 2:  # 여유있게 2배
+                # 충분한 게시글이 로드되었는지 확인 (목표의 1.5배)
+                if len(current_posts) >= target_count * 1.5:
                     break
+
+                # 추가 스크롤이 필요한지 확인 (이전 스크롤과 비교)
+                if scroll_attempt > 0:
+                    # 이전 스크롤에서 새로운 게시글이 거의 로드되지 않았다면 중단
+                    if hasattr(self, "_previous_post_count"):
+                        new_posts = len(current_posts) - self._previous_post_count
+                        if new_posts < 3:  # 새로 로드된 게시글이 3개 미만이면 중단
+                            typer.echo(
+                                f"   새로운 게시글 로딩이 부족하여 스크롤 중단 (새 게시글: {new_posts}개)"
+                            )
+                            break
+
+                self._previous_post_count = len(current_posts)
 
         except Exception as e:
             typer.echo(f"⚠️  스크롤 중 오류: {e}")
@@ -811,12 +1015,13 @@ class ThreadsCrawler(BaseCrawler):
     async def _extract_post_data(self, element) -> Dict[str, Any]:
         """단일 게시글에서 데이터를 추출합니다."""
 
-        # 디버깅: 전체 요소 구조 확인
-        try:
-            full_text = await element.inner_text()
-            typer.echo(f"   🔍 전체 요소 텍스트: {full_text[:200]}...")
-        except:
-            pass
+        # 디버깅: 전체 요소 구조 확인 (디버그 모드에서만)
+        if self.debug_mode:
+            try:
+                full_text = await element.inner_text()
+                typer.echo(f"   🔍 전체 요소 텍스트: {full_text[:200]}...")
+            except:
+                pass
 
         # 작성자 정보 추출
         author = await self._extract_author(element)
@@ -842,15 +1047,76 @@ class ThreadsCrawler(BaseCrawler):
         }
 
     async def _extract_author(self, element) -> str:
-        """작성자 정보 추출"""
-        # 프로필 링크에서 사용자명 추출
-        author_link = await element.query_selector('a[href*="/@"]:not([href*="/post/"])')
-        if author_link:
-            href = await author_link.get_attribute("href")
-            if href and "/@" in href:
-                # /@username 형태에서 username 추출
-                author = href.split("/@")[-1].split("/")[0]
-                return author
+        """작성자 정보 추출 (완전히 재작성된 로직)"""
+        try:
+            # 방법 1: 게시글 컨테이너에서 직접 작성자 텍스트 찾기
+            full_text = await element.inner_text()
+            if full_text:
+                lines = full_text.split("\n")
+
+                # 디버그 모드에서 텍스트 분석
+                if self.debug_mode:
+                    typer.echo(f"   📝 텍스트 분석 (첫 10줄): {lines[:10]}")
+
+                # "For you", "Following", "What's new?", "Post" 등 헤더 텍스트 건너뛰기
+                skip_texts = ["For you", "Following", "What's new?", "Post", "Translate", "Sorry,"]
+
+                for line in lines:
+                    line = line.strip()
+
+                    # 시간 표시 패턴 체크 (작성자 바로 다음에 나옴)
+                    if re.match(r"^\d+[hdmws]$|^\d+\s?(시간|분|일|주).*", line):
+                        break
+
+                    # 건너뛸 텍스트가 아니고, 적절한 길이의 텍스트인 경우
+                    if (
+                        line
+                        and len(line) > 2
+                        and len(line) < 50
+                        and not any(skip in line for skip in skip_texts)
+                        and not line.isdigit()
+                        and not re.match(
+                            r"^\d+[KMB]?$", line
+                        )  # 숫자만 있는 라인 제외 (좋아요 수 등)
+                        and not "reposted" in line.lower()
+                    ):
+
+                        # 잠재적 작성자명인지 확인
+                        potential_author = line.strip()
+
+                        # @기호 제거
+                        if potential_author.startswith("@"):
+                            potential_author = potential_author[1:]
+
+                        # 유효한 사용자명 패턴인지 확인
+                        if re.match(r"^[a-zA-Z0-9_.]+$", potential_author):
+                            if self.debug_mode:
+                                typer.echo(
+                                    f"   👤 텍스트에서 발견된 작성자: '{potential_author}' (라인: '{line}')"
+                                )
+                            return potential_author
+
+            # 방법 2: href 링크에서 추출 (fallback)
+            author_links = await element.query_selector_all('a[href*="/@"]:not([href*="/post/"])')
+
+            for author_link in author_links:
+                href = await author_link.get_attribute("href")
+                if href and "/@" in href and "/post/" not in href:
+                    author = href.split("/@")[-1].split("/")[0]
+
+                    if self.debug_mode:
+                        link_text = await author_link.inner_text()
+                        typer.echo(
+                            f"   👤 링크에서 발견된 작성자: '{author}' (링크: {href}, 텍스트: '{link_text[:30]}')"
+                        )
+
+                    if len(author) > 1 and author.replace("_", "").replace(".", "").isalnum():
+                        return author
+
+        except Exception as e:
+            if self.debug_mode:
+                typer.echo(f"   ⚠️ 작성자 추출 중 오류: {e}")
+
         return "Unknown"
 
     async def _extract_post_url(self, element) -> Optional[str]:
@@ -947,10 +1213,15 @@ class ThreadsCrawler(BaseCrawler):
                         )
                         if count_span:
                             count_text = await count_span.inner_text()
-                            interactions["likes"] = self._parse_interaction_count(
-                                count_text.strip()
+                            interactions["likes"] = (
+                                self._parse_interaction_count(count_text.strip())
+                                if count_text
+                                else 0
                             )
-                            typer.echo(f"   ✅ Like 추출: {count_text} → {interactions['likes']}")
+                            if self.debug_mode:
+                                typer.echo(
+                                    f"   ✅ Like 추출: {count_text} → {interactions['likes']}"
+                                )
                         else:
                             # 대안: 버튼 전체 텍스트에서 숫자 찾기
                             button_text = await like_button.inner_text()
@@ -981,9 +1252,10 @@ class ThreadsCrawler(BaseCrawler):
                                 if count_text
                                 else 0
                             )
-                            typer.echo(
-                                f"   ✅ Comment 추출: {count_text} → {interactions['comments']}"
-                            )
+                            if self.debug_mode:
+                                typer.echo(
+                                    f"   ✅ Comment 추출: {count_text} → {interactions['comments']}"
+                                )
                         else:
                             # 댓글은 숫자가 없을 때 span 자체가 없을 수 있음
                             interactions["comments"] = 0
@@ -1009,9 +1281,10 @@ class ThreadsCrawler(BaseCrawler):
                                 if count_text
                                 else 0
                             )
-                            typer.echo(
-                                f"   ✅ Repost 추출: {count_text} → {interactions['shares']}"
-                            )
+                            if self.debug_mode:
+                                typer.echo(
+                                    f"   ✅ Repost 추출: {count_text} → {interactions['shares']}"
+                                )
                         else:
                             interactions["shares"] = 0
                             typer.echo(f"   ✅ Repost 추출: 숫자 없음 → 0")
@@ -1037,9 +1310,10 @@ class ThreadsCrawler(BaseCrawler):
                                     if count_text
                                     else 0
                                 )
-                                typer.echo(
-                                    f"   ✅ Share 추출: {count_text} → {interactions['shares']}"
-                                )
+                                if self.debug_mode:
+                                    typer.echo(
+                                        f"   ✅ Share 추출: {count_text} → {interactions['shares']}"
+                                    )
                     except Exception as e:
                         typer.echo(f"   ⚠️ Share 추출 중 오류: {e}")
 
@@ -1076,14 +1350,23 @@ class ThreadsCrawler(BaseCrawler):
             return 0
 
     def _is_valid_post(self, post_data: Dict[str, Any]) -> bool:
-        """게시글 데이터가 유효한지 확인"""
+        """게시글 데이터가 유효한지 확인 (조건 완화)"""
         content = post_data.get("content", "")
         author = post_data.get("author", "")
 
-        # 조건을 완화: 콘텐츠가 3자 이상이고 작성자가 있으면 유효
-        return bool(
-            content and len(str(content).strip()) >= 3 and author and str(author) != "Unknown"
+        # 조건을 완화: 콘텐츠가 1자 이상이고 작성자가 있으면 유효
+        # (이미지 전용 게시글도 수집하기 위해)
+        is_valid = bool(
+            (content and len(str(content).strip()) >= 1) and author and str(author) != "Unknown"
         )
+
+        # 디버그 모드에서 유효성 검사 정보 출력
+        if self.debug_mode:
+            typer.echo(
+                f"   🔍 유효성 검사: author='{author}', content_len={len(str(content).strip())}, valid={is_valid}"
+            )
+
+        return is_valid
 
     async def _debug_screenshot(self, page: Page, step_name: str) -> None:
         """디버그 모드에서 스크린샷을 저장합니다."""

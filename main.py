@@ -515,14 +515,6 @@ def threads(
     if debug:
         typer.echo(f"   - 디버그 스크린샷: data/debug_screenshots/")
 
-    # 첫 번째 게시글 미리보기
-    if posts:
-        first_post = posts[0]
-        typer.echo(f"\n📄 첫 번째 게시글 미리보기:")
-        typer.echo(f"   작성자: {first_post.author}")
-        typer.echo(f"   내용: {first_post.content[:100]}...")
-        typer.echo(f"   시간: {first_post.timestamp}")
-
 
 @app.command()
 def linkedin(
