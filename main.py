@@ -274,6 +274,50 @@ def x(
 
 
 @app.command()
+def reddit(
+    count: int = typer.Option(10, "--count", "-c", help="수집할 게시글 수"),
+    debug: bool = typer.Option(False, "--debug", "-d", help="디버그 모드"),
+):
+    """Reddit에서 게시글을 크롤링합니다"""
+    typer.echo(f"🔴 Reddit 크롤링 시작 (목표: {count}개 게시글)")
+
+    from src.crawlers.reddit import RedditCrawler
+
+    crawler = RedditCrawler(debug_mode=debug)
+    posts = asyncio.run(crawler.crawl(count))
+
+    if posts:
+        typer.echo(f"✅ {len(posts)}개 게시글 수집 완료!")
+
+        # 데이터 저장
+        data = [post.model_dump() for post in posts]
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"data/reddit_{timestamp}.json"
+
+        # 데이터 디렉토리 생성
+        Path("data").mkdir(exist_ok=True)
+
+        with open(filename, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2, default=str)
+
+        typer.echo(f"💾 데이터 저장 완료: {filename}")
+
+        # 첫 번째 게시글 미리보기
+        if posts:
+            first_post = posts[0]
+            typer.echo(f"\\n📝 첫 번째 게시글 미리보기:")
+            typer.echo(f"   작성자: {first_post.author}")
+            typer.echo(f"   내용: {first_post.content[:100]}...")
+            typer.echo(f"   시간: {first_post.timestamp}")
+            if first_post.likes:
+                typer.echo(f"   업보트: {first_post.likes}")
+            if first_post.comments:
+                typer.echo(f"   댓글: {first_post.comments}")
+    else:
+        typer.echo("❌ 수집된 게시글이 없습니다.")
+
+
+@app.command()
 def version():
     """버전 정보를 출력합니다."""
     typer.echo("SNS Crawler v0.1.0")
