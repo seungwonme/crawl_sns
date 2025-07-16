@@ -30,9 +30,9 @@ from abc import ABC, abstractmethod
 from typing import List, Optional
 
 import typer
-from playwright.async_api import Browser, BrowserContext, Page, async_playwright
+from playwright.async_api import Page, async_playwright
 
-from ..models import Post
+from ..models import Post  # pylint: disable=relative-beyond-top-level
 
 
 class BaseCrawler(ABC):
@@ -111,22 +111,22 @@ class BaseCrawler(ABC):
                             await asyncio.wait_for(asyncio.to_thread(input), timeout=300)
                         except asyncio.TimeoutError:
                             typer.echo("⏰ 5분 타임아웃 - 브라우저를 자동으로 닫습니다")
-                        except:
+                        except Exception:
                             pass
                     await browser.close()
 
             typer.echo(f"📊 총 {len(posts)}개의 게시글을 추출했습니다.")
 
             if not posts:
-                typer.echo(f"❌ 게시글을 추출하지 못했습니다.")
+                typer.echo("❌ 게시글을 추출하지 못했습니다.")
                 if self.debug_mode:
-                    typer.echo(f"💡 디버그 힌트:")
-                    typer.echo(f"   - 브라우저에서 직접 확인해보세요")
-                    typer.echo(f"   - 네트워크 연결 상태를 점검하세요")
-                    typer.echo(f"   - 플랫폼 접근 권한을 확인하세요")
+                    typer.echo("💡 디버그 힌트:")
+                    typer.echo("   - 브라우저에서 직접 확인해보세요")
+                    typer.echo("   - 네트워크 연결 상태를 점검하세요")
+                    typer.echo("   - 플랫폼 접근 권한을 확인하세요")
                 else:
                     typer.echo(f"💡 힌트: {self.platform_name}은(는) 로그인이 필요할 수 있습니다.")
-                    typer.echo(f"   디버그 모드로 다시 실행해보세요: --debug")
+                    typer.echo("   디버그 모드로 다시 실행해보세요: --debug")
 
         except Exception as e:
             typer.echo(f"❌ 크롤링 중 오류 발생: {e}")

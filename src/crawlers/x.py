@@ -71,9 +71,9 @@ class XCrawler(BaseCrawler):
         # 환경 변수 기반 설정
         self.username = os.getenv("X_USERNAME")
         self.password = os.getenv("X_PASSWORD")
-        self.session_path = Path(os.getenv("X_SESSION_PATH", "./data/x_session.json"))
-        self.login_timeout = int(os.getenv("X_LOGIN_TIMEOUT", "30000"))
-        self.login_retry_count = int(os.getenv("X_LOGIN_RETRY_COUNT", "3"))
+        self.session_path = Path("./data/sessions/x_session.json")
+        self.login_timeout = 30000
+        self.login_retry_count = 3
 
         # 점진적 추출 설정
         self.max_scroll_attempts = 8
@@ -176,7 +176,7 @@ class XCrawler(BaseCrawler):
         post_elements = await self._find_post_elements(page)
         posts_data = []
 
-        for i, element in enumerate(post_elements[: target_count * 2]):  # 여유분 확보
+        for element in post_elements[: target_count * 2]:  # 여유분 확보
             try:
                 post_data = await self._extract_post_data(element)
                 if post_data:
@@ -188,7 +188,7 @@ class XCrawler(BaseCrawler):
 
         return posts_data
 
-    async def _find_post_elements(self, page: Page) -> List[Any]:
+    async def _find_post_elements(self, page: Page) -> List[Any]:  # noqa: C901
         """X 게시글 DOM 요소들을 찾습니다"""
         try:
             # X 게시글 컨테이너 선택자들
@@ -221,7 +221,7 @@ class XCrawler(BaseCrawler):
                     if content_hash not in seen_content:
                         seen_content.add(content_hash)
                         unique_elements.append(element)
-                except:
+                except Exception:
                     unique_elements.append(element)
 
             return unique_elements
@@ -259,7 +259,7 @@ class XCrawler(BaseCrawler):
 
             return has_author
 
-        except:
+        except Exception:
             return False
 
     async def _extract_post_data(self, element) -> Optional[Dict[str, Any]]:
@@ -285,7 +285,7 @@ class XCrawler(BaseCrawler):
         except Exception:
             return None
 
-    async def _extract_author(self, element) -> str:
+    async def _extract_author(self, element) -> str:  # noqa: C901
         """작성자 정보 추출"""
         try:
             # X 작성자 선택자들
@@ -306,7 +306,7 @@ class XCrawler(BaseCrawler):
                             author_name = text.strip().split("\n")[0].strip()
                             if len(author_name) > 1 and not author_name.isdigit():
                                 return author_name
-                except:
+                except Exception:
                     continue
 
             # fallback: href에서 추출
@@ -318,7 +318,7 @@ class XCrawler(BaseCrawler):
                         username = href.split("/")[1].split("?")[0]
                         if username and len(username) > 1 and not username.isdigit():
                             return f"@{username}"
-                except:
+                except Exception:
                     continue
 
         except Exception:
@@ -326,7 +326,7 @@ class XCrawler(BaseCrawler):
 
         return "Unknown"
 
-    async def _extract_content(self, element) -> str:
+    async def _extract_content(self, element) -> str:  # noqa: C901
         """게시글 콘텐츠 추출"""
         try:
             content_text = ""
@@ -366,7 +366,7 @@ class XCrawler(BaseCrawler):
                     if content_parts:
                         content_text = " ".join(content_parts[:3])  # 상위 3개 부분만
                         break
-                except:
+                except Exception:
                     continue
 
             # 대안: 전체 텍스트에서 추출 및 정리
@@ -428,7 +428,7 @@ class XCrawler(BaseCrawler):
 
         return "\n".join(final_lines[:5])  # 상위 5줄만
 
-    async def _extract_interactions(self, element) -> Dict[str, Optional[int]]:
+    async def _extract_interactions(self, element) -> Dict[str, Optional[int]]:  # noqa: C901
         """X 상호작용 정보 추출 - 개선된 버전"""
         interactions: Dict[str, Optional[int]] = {
             "likes": None,
@@ -513,7 +513,6 @@ class XCrawler(BaseCrawler):
                 return 0
 
             # "8683 Replies. Reply" 형태에서 숫자 추출
-            import re
 
             # 숫자 패턴 찾기 (쉼표 포함)
             patterns = [
@@ -533,7 +532,9 @@ class XCrawler(BaseCrawler):
         except Exception:
             return 0
 
-    async def _extract_interactions_fallback(self, element, interactions: Dict[str, Optional[int]]):
+    async def _extract_interactions_fallback(  # noqa: C901
+        self, element, interactions: Dict[str, Optional[int]]
+    ):
         """대안 상호작용 추출 방법"""
         try:
             # data-testid 기반 선택자들
@@ -599,7 +600,7 @@ class XCrawler(BaseCrawler):
         except Exception:
             return 0
 
-    async def _extract_post_url(self, element) -> Optional[str]:
+    async def _extract_post_url(self, element) -> Optional[str]:  # noqa: C901
         """게시글 URL 추출"""
         try:
             # X 게시글 URL 패턴들
@@ -630,7 +631,7 @@ class XCrawler(BaseCrawler):
                                 return f"https://x.com{href}"
                             elif href.startswith("http"):
                                 return href
-                except:
+                except Exception:
                     continue
 
         except Exception:
@@ -701,7 +702,7 @@ class XCrawler(BaseCrawler):
                 typer.echo("🔄 기존 X 세션 로드 중...")
 
                 # Storage State 로드
-                with open(self.session_path, "r") as f:
+                with open(self.session_path, "r", encoding="utf-8") as f:
                     storage_state = json.load(f)
 
                 # 브라우저 컨텍스트에 Storage State 적용
@@ -791,7 +792,7 @@ class XCrawler(BaseCrawler):
                     element = await page.query_selector(selector)
                     if element:
                         return True
-                except:
+                except Exception:
                     continue
 
             return False
@@ -799,7 +800,7 @@ class XCrawler(BaseCrawler):
         except Exception:
             return False
 
-    async def _attempt_login(self, page: Page) -> bool:
+    async def _attempt_login(self, page: Page) -> bool:  # noqa: C901
         """X 계정 로그인 시도"""
         if not self.username or not self.password:
             typer.echo("⚠️ 환경 변수에 X 계정 정보가 없음 (.env 파일 확인 필요)")
@@ -953,10 +954,10 @@ class XCrawler(BaseCrawler):
             storage_state = await page.context.storage_state()
 
             # 세션 파일에 저장
-            with open(self.session_path, "w") as f:
+            with open(self.session_path, "w", encoding="utf-8") as f:
                 json.dump(storage_state, f, indent=2)
 
-            typer.echo(f"💾 X 세션이 저장됨")
+            typer.echo("💾 X 세션이 저장됨")
             return True
 
         except Exception as e:

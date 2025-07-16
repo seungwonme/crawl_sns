@@ -1,8 +1,22 @@
 [project]
 name = "crawl-sns"
 version = "0.1.0"
-description = "Add your description here"
+description = "SNS 플랫폼(Threads, LinkedIn, X, Reddit) 크롤링 도구"
 readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "Aiden Ahn", email = "senugw0u@gmail.com"}
+]
+keywords = ["sns", "crawler", "social-media", "threads", "linkedin", "twitter", "reddit"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Internet :: WWW/HTTP :: Dynamic Content",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 requires-python = ">=3.12"
 dependencies = [
     "playwright>=1.52.0",
@@ -11,6 +25,22 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "requests>=2.32.3",
 ]
+
+[project.scripts]
+crawl-sns = "main:app"
+
+[project.urls]
+Homepage = "https://github.com/your-org/crawl-sns"
+Repository = "https://github.com/your-org/crawl-sns"
+Issues = "https://github.com/your-org/crawl-sns/issues"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
 [tool.black]
 target-version = ['py313']
 line-length = 100

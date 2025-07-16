@@ -28,6 +28,7 @@
 import json
 import os
 import random
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -70,9 +71,9 @@ class LinkedInCrawler(BaseCrawler):
         # 환경 변수 기반 설정
         self.username = os.getenv("LINKEDIN_USERNAME")
         self.password = os.getenv("LINKEDIN_PASSWORD")
-        self.session_path = Path(os.getenv("LINKEDIN_SESSION_PATH", "./data/linkedin_session.json"))
-        self.login_timeout = int(os.getenv("LINKEDIN_LOGIN_TIMEOUT", "30000"))
-        self.login_retry_count = int(os.getenv("LINKEDIN_LOGIN_RETRY_COUNT", "3"))
+        self.session_path = Path("./data/sessions/linkedin_session.json")
+        self.login_timeout = 30000
+        self.login_retry_count = 3
 
         # 점진적 추출 설정
         self.max_scroll_attempts = 5
@@ -173,7 +174,7 @@ class LinkedInCrawler(BaseCrawler):
         typer.echo(f"📊 수집 완료: {len(posts)}개 게시글")
         return posts[:target_count]
 
-    async def _expand_all_posts_on_page(self, page: Page):
+    async def _expand_all_posts_on_page(self, page: Page):  # noqa: C901
         """현재 페이지의 모든 더보기 버튼을 클릭합니다"""
         try:
             # 더보기 버튼들 찾기
@@ -200,9 +201,9 @@ class LinkedInCrawler(BaseCrawler):
                                 await button.click()
                                 await page.wait_for_timeout(300)
                                 expanded_count += 1
-                        except:
+                        except Exception:
                             continue
-                except:
+                except Exception:
                     continue
 
             if expanded_count > 0:
@@ -216,7 +217,7 @@ class LinkedInCrawler(BaseCrawler):
         post_elements = await self._find_post_elements(page)
         posts_data = []
 
-        for i, element in enumerate(post_elements[: target_count * 2]):  # 여유분 확보
+        for element in post_elements[: target_count * 2]:  # 여유분 확보
             try:
                 post_data = await self._extract_post_data_simple(element)
                 if post_data:
@@ -271,7 +272,7 @@ class LinkedInCrawler(BaseCrawler):
         except Exception as e:
             typer.echo(f"   ⚠️ 스크롤 중 오류: {e}")
 
-    async def _find_post_elements(self, page: Page) -> List[Any]:
+    async def _find_post_elements(self, page: Page) -> List[Any]:  # noqa: C901
         """게시글 DOM 요소들을 찾습니다 (다중 선택자 시스템)"""
         try:
             # LinkedIn 게시글 컨테이너 선택자들
@@ -312,7 +313,7 @@ class LinkedInCrawler(BaseCrawler):
                     if element_id not in seen_elements:
                         seen_elements.add(element_id)
                         unique_elements.append(element)
-                except:
+                except Exception:
                     unique_elements.append(element)
 
             return unique_elements
@@ -343,10 +344,10 @@ class LinkedInCrawler(BaseCrawler):
 
             return True
 
-        except:
+        except Exception:
             return False
 
-    async def _extract_author_progressive(self, element) -> str:
+    async def _extract_author_progressive(self, element) -> str:  # noqa: C901
         """작성자 정보 점진적 추출"""
         try:
             # LinkedIn 작성자 링크 선택자들 (실제 HTML 구조 기반)
@@ -376,7 +377,7 @@ class LinkedInCrawler(BaseCrawler):
                             author_name = text.strip().split("\n")[0].strip()
                             if len(author_name) > 1 and not author_name.isdigit():
                                 return author_name
-                except:
+                except Exception:
                     continue
 
             # fallback: href에서 추출
@@ -395,7 +396,7 @@ class LinkedInCrawler(BaseCrawler):
 
                             if username and len(username) > 1 and not username.isdigit():
                                 return username.replace("-", " ").title()
-                except:
+                except Exception:
                     continue
 
         except Exception:
@@ -403,7 +404,7 @@ class LinkedInCrawler(BaseCrawler):
 
         return "Unknown"
 
-    async def _extract_content_progressive(self, element) -> str:
+    async def _extract_content_progressive(self, element) -> str:  # noqa: C901
         """게시글 콘텐츠 점진적 추출 (더보기 클릭 후)"""
         try:
             content_text = ""
@@ -431,7 +432,7 @@ class LinkedInCrawler(BaseCrawler):
                         if text and len(text.strip()) > 20:
                             content_text = text.strip()
                             break
-                except:
+                except Exception:
                     continue
 
             # 대안: 전체 텍스트에서 추출 및 정리
@@ -449,7 +450,7 @@ class LinkedInCrawler(BaseCrawler):
         except Exception:
             return ""
 
-    async def _extract_content_fallback(self, element) -> str:
+    async def _extract_content_fallback(self, element) -> str:  # noqa: C901
         """콘텐츠 추출 폴백 방법 (개별 텍스트 노드 조합)"""
         try:
             # 모든 텍스트 요소들을 찾아서 조합
@@ -478,7 +479,7 @@ class LinkedInCrawler(BaseCrawler):
                         ):
                             content_parts.append(text.strip())
 
-                except:
+                except Exception:
                     continue
 
             if content_parts:
@@ -490,7 +491,7 @@ class LinkedInCrawler(BaseCrawler):
 
                 return " ".join(unique_parts[:3])  # 상위 3개 부분만 조합
 
-        except:
+        except Exception:
             pass
 
         return ""
@@ -554,7 +555,9 @@ class LinkedInCrawler(BaseCrawler):
 
         return "\n".join(final_lines)
 
-    async def _extract_interactions_progressive(self, element) -> Dict[str, Optional[int]]:
+    async def _extract_interactions_progressive(  # noqa: C901
+        self, element
+    ) -> Dict[str, Optional[int]]:
         """상호작용 정보 점진적 추출"""
         interactions: Dict[str, Optional[int]] = {"likes": None, "comments": None, "shares": None}
 
@@ -679,7 +682,7 @@ class LinkedInCrawler(BaseCrawler):
 
         return None
 
-    async def _extract_timestamp_progressive(self, element) -> str:
+    async def _extract_timestamp_progressive(self, element) -> str:  # noqa: C901
         """게시 시간 점진적 추출 - 개선된 버전"""
         try:
             # 1단계: 정확한 타임스탬프 선택자로 직접 추출
@@ -701,7 +704,7 @@ class LinkedInCrawler(BaseCrawler):
                             cleaned_timestamp = self._extract_time_from_text(time_text.strip())
                             if cleaned_timestamp:
                                 return cleaned_timestamp
-                except:
+                except Exception:
                     continue
 
             # 2단계: 대안 검색 - 시간 관련 키워드가 포함된 요소 찾기
@@ -725,7 +728,7 @@ class LinkedInCrawler(BaseCrawler):
                             cleaned_timestamp = self._extract_time_from_text(time_text.strip())
                             if cleaned_timestamp:
                                 return cleaned_timestamp
-                except:
+                except Exception:
                     continue
 
         except Exception:
@@ -767,8 +770,6 @@ class LinkedInCrawler(BaseCrawler):
             r"(현재\s*시간)",
             r"(남은\s*시간)",
         ]
-
-        import re
 
         # 각 패턴으로 시간 정보 찾기
         for pattern in time_patterns:
@@ -830,7 +831,7 @@ class LinkedInCrawler(BaseCrawler):
                 typer.echo("🔄 기존 세션 로드 중...")
 
                 # Storage State 로드
-                with open(self.session_path, "r") as f:
+                with open(self.session_path, "r", encoding="utf-8") as f:
                     storage_state = json.load(f)
 
                 # 브라우저 컨텍스트에 Storage State 적용
@@ -931,7 +932,7 @@ class LinkedInCrawler(BaseCrawler):
         except Exception:
             return False
 
-    async def _attempt_login(self, page: Page) -> bool:
+    async def _attempt_login(self, page: Page) -> bool:  # noqa: C901
         """LinkedIn 계정 로그인 시도"""
         if not self.username or not self.password:
             typer.echo("⚠️ 환경 변수에 계정 정보가 없음 (.env 파일 확인 필요)")
@@ -1053,10 +1054,10 @@ class LinkedInCrawler(BaseCrawler):
             storage_state = await page.context.storage_state()
 
             # 세션 파일에 저장
-            with open(self.session_path, "w") as f:
+            with open(self.session_path, "w", encoding="utf-8") as f:
                 json.dump(storage_state, f, indent=2)
 
-            typer.echo(f"💾 세션이 저장됨")
+            typer.echo("💾 세션이 저장됨")
             return True
 
         except Exception as e:

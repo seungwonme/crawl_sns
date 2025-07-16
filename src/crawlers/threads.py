@@ -56,31 +56,23 @@ class ThreadsCrawler(BaseCrawler):
     """
 
     def __init__(self, debug_mode: bool = False):
-        # 기본 User-Agent를 데스크톱 Chrome으로 변경 (모바일에서 데스크톱으로)
-        default_user_agent = os.getenv(
-            "THREADS_USER_AGENT",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        )
-
         super().__init__(
             platform_name="Threads",
             base_url="https://threads.net",
-            user_agent=default_user_agent,
-            debug_mode=debug_mode,  # 부모 클래스에 debug_mode 전달
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            debug_mode=debug_mode,
         )
 
         # 환경 변수 기반 설정
         self.username = os.getenv("THREADS_USERNAME")
         self.password = os.getenv("THREADS_PASSWORD")
-        self.session_path = Path(os.getenv("THREADS_SESSION_PATH", "./data/threads_session.json"))
-        self.login_timeout = int(os.getenv("THREADS_LOGIN_TIMEOUT", "30000"))
-        self.login_retry_count = int(os.getenv("THREADS_LOGIN_RETRY_COUNT", "3"))
+        self.session_path = Path("./data/sessions/threads_session.json")
+        self.login_timeout = 30000
+        self.login_retry_count = 3
 
-        # 디버그 모드 설정 (부모에서 이미 설정되지만 여기서도 명시적으로 설정)
-        self.debug_mode = debug_mode or os.getenv("THREADS_DEBUG_MODE", "false").lower() == "true"
-        self.debug_screenshot_path = Path(
-            os.getenv("THREADS_DEBUG_SCREENSHOT_PATH", "./data/debug_screenshots")
-        )
+        # 디버그 모드 설정
+        self.debug_mode = debug_mode
+        self.debug_screenshot_path = Path("./data/debug/threads")
 
         # 상태 관리
         self.is_logged_in = False
@@ -110,7 +102,7 @@ class ThreadsCrawler(BaseCrawler):
 
         # Threads 메인 페이지로 이동
         await page.goto(self.base_url, wait_until="networkidle")
-        typer.echo(f"✅ 페이지 로드 성공")
+        typer.echo("✅ 페이지 로드 성공")
 
         # 로그인 시도 (세션이 유효하지 않은 경우만)
         if not self.is_logged_in:
@@ -148,7 +140,7 @@ class ThreadsCrawler(BaseCrawler):
 
         return posts
 
-    async def _load_session(self, page: Page) -> bool:
+    async def _load_session(self, page: Page) -> bool:  # noqa: C901
         """
         저장된 세션 상태를 로드합니다 (Storage State 기반)
 
@@ -163,7 +155,7 @@ class ThreadsCrawler(BaseCrawler):
                 typer.echo("🔄 기존 세션 로드 중...")
 
                 # Storage State 로드
-                with open(self.session_path, "r") as f:
+                with open(self.session_path, "r", encoding="utf-8") as f:
                     storage_state = json.load(f)
 
                 # 브라우저 컨텍스트에 Storage State 적용
@@ -224,7 +216,7 @@ class ThreadsCrawler(BaseCrawler):
             storage_state = await page.context.storage_state()
 
             # 세션 파일에 저장
-            with open(self.session_path, "w") as f:
+            with open(self.session_path, "w", encoding="utf-8") as f:
                 json.dump(storage_state, f, indent=2)
 
             typer.echo(f"💾 세션이 {self.session_path}에 저장됨")
@@ -236,7 +228,7 @@ class ThreadsCrawler(BaseCrawler):
                 typer.echo(f"   디버그: {e}")
             return False
 
-    async def _attempt_login(self, page: Page) -> bool:
+    async def _attempt_login(self, page: Page) -> bool:  # noqa: C901
         """Instagram 계정을 통한 Threads 로그인 시도"""
         if not self.username or not self.password:
             typer.echo("⚠️ 환경 변수에 계정 정보가 없음 (.env 파일 확인 필요)")
@@ -346,7 +338,7 @@ class ThreadsCrawler(BaseCrawler):
                         await page.wait_for_timeout(random.randint(3000, 5000))
 
             except PlaywrightTimeoutError:
-                typer.echo(f"   ⏱️ 타임아웃")
+                typer.echo("   ⏱️ 타임아웃")
                 if attempt < self.login_retry_count - 1:
                     await page.wait_for_timeout(random.randint(2000, 4000))
             except Exception as e:
@@ -433,19 +425,19 @@ class ThreadsCrawler(BaseCrawler):
                 'div[role="button"]:has-text("What\'s new?")'
             )
             if new_post_button:
-                typer.echo(f"   ✅ 로그인 상태 확인: 게시글 작성 버튼 발견")
+                typer.echo("   ✅ 로그인 상태 확인: 게시글 작성 버튼 발견")
                 return True
 
             # 방법 4: "Post" 버튼 확인
             post_button = await page.query_selector('div[role="button"]:has-text("Post")')
             if post_button:
-                typer.echo(f"   ✅ 로그인 상태 확인: Post 버튼 발견")
+                typer.echo("   ✅ 로그인 상태 확인: Post 버튼 발견")
                 return True
 
             # 방법 5: "For you" 탭 확인 (로그인된 사용자만 보임)
             for_you_tab = await page.query_selector('text="For you"')
             if for_you_tab:
-                typer.echo(f"   ✅ 로그인 상태 확인: For you 탭 발견")
+                typer.echo("   ✅ 로그인 상태 확인: For you 탭 발견")
                 return True
 
             # 방법 6: 사용자 프로필 이미지나 링크 확인
@@ -456,7 +448,7 @@ class ThreadsCrawler(BaseCrawler):
                 )
                 return True
 
-            typer.echo(f"   ❌ 로그인 상태 확인: 로그인 필요한 상태로 판단")
+            typer.echo("   ❌ 로그인 상태 확인: 로그인 필요한 상태로 판단")
             return False
 
         except Exception as e:
@@ -500,7 +492,7 @@ class ThreadsCrawler(BaseCrawler):
                 typer.echo(f"오류 메시지 추출 중 문제: {e}")
             return None
 
-    async def _extract_posts_incrementally(
+    async def _extract_posts_incrementally(  # noqa: C901
         self, page: Page, target_count: int
     ) -> List[Dict[str, Any]]:
         """
@@ -644,7 +636,7 @@ class ThreadsCrawler(BaseCrawler):
             **interactions,
         }
 
-    async def _extract_author(self, element) -> str:
+    async def _extract_author(self, element) -> str:  # noqa: C901
         """작성자 정보 추출"""
         try:
             # href 링크에서 직접 추출
@@ -860,7 +852,7 @@ class ThreadsCrawler(BaseCrawler):
             (content and len(str(content).strip()) >= 1) and author and str(author) != "Unknown"
         )
 
-    async def _handle_post_login_steps(self, page: Page) -> None:
+    async def _handle_post_login_steps(self, page: Page) -> None:  # noqa: C901
         """로그인 후 추가 단계 처리"""
         try:
             # "Save your login info?" 화면에서 버튼 클릭

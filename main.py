@@ -76,12 +76,14 @@ def generate_output_filename(platform: str, custom_output: Optional[str] = None)
         return custom_output
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return f"data/{platform}_{timestamp}.json"
+    return f"data/{platform}/{timestamp}.json"
 
 
-def ensure_data_directory() -> None:
-    """data 디렉토리가 존재하는지 확인하고 생성합니다."""
+def ensure_data_directory(platform: str = None) -> None:
+    """data 디렉토리와 플랫폼별 하위 디렉토리가 존재하는지 확인하고 생성합니다."""
     Path("data").mkdir(exist_ok=True)
+    if platform:
+        Path(f"data/{platform}").mkdir(exist_ok=True)
 
 
 # === Platform Crawling Commands ===
@@ -117,7 +119,7 @@ def threads(
         raise typer.Exit(1)
 
     # JSON 파일 저장 (기본)
-    ensure_data_directory()
+    ensure_data_directory("threads")
     output_file = generate_output_filename("threads", output)
     save_posts_to_file(posts, output_file)
 
@@ -177,7 +179,7 @@ def linkedin(
         raise typer.Exit(1)
 
     # JSON 파일 저장 (기본)
-    ensure_data_directory()
+    ensure_data_directory("linkedin")
     output_file = generate_output_filename("linkedin", output)
     save_posts_to_file(posts, output_file)
 
@@ -235,7 +237,7 @@ def x(
         raise typer.Exit(1)
 
     # JSON 파일 저장 (기본)
-    ensure_data_directory()
+    ensure_data_directory("x")
     output_file = generate_output_filename("x", output)
     save_posts_to_file(posts, output_file)
 
@@ -293,7 +295,7 @@ def reddit(
         raise typer.Exit(1)
 
     # JSON 파일 저장 (기본)
-    ensure_data_directory()
+    ensure_data_directory("reddit")
     output_file = generate_output_filename("reddit", output)
     save_posts_to_file(posts, output_file)
 
