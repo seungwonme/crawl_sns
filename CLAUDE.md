@@ -26,6 +26,12 @@ black . --config pyproject.toml
 # Run isort for import sorting
 isort . --settings-path pyproject.toml
 
+# Run flake8 linter
+flake8
+
+# Run pylint
+pylint src/
+
 # Pre-commit hooks (if pre-commit is installed)
 pre-commit install
 pre-commit run --all-files

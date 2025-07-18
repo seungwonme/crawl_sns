@@ -89,108 +89,64 @@ class RedditCrawler(BaseCrawler):
         typer.echo(f"🔴 Reddit 크롤링 시작 (목표: {count}개)")
         return await super().crawl(count)
 
-    async def _fill_login_field(
-        self, page: Page, selectors: List[str], value: str, field_name: str
-    ) -> bool:
-        """로그인 필드 입력 헬퍼 메서드"""
-        for selector in selectors:
-            try:
-                input_field = await page.wait_for_selector(selector, timeout=3000)
-                if input_field and value:
-                    await input_field.fill(value)
-                    typer.echo(f"   ✅ {field_name} 입력 완료")
-                    return True
-            except PlaywrightTimeoutError:
-                continue
-        typer.echo(f"   ❌ {field_name} 입력 필드를 찾을 수 없음")
-        return False
-
-    async def _click_login_button(self, page: Page) -> bool:
-        """로그인 버튼 클릭 헬퍼 메서드"""
-        login_button_selectors = [
-            'button[type="submit"]',
-            'button:has-text("Log In")',
-            'button:has-text("Sign In")',
-            ".login-button",
-            '[data-testid="login-button"]',
-        ]
-
-        for selector in login_button_selectors:
-            try:
-                login_button = await page.wait_for_selector(selector, timeout=3000)
-                if login_button:
-                    await login_button.click()
-                    typer.echo("   🔄 로그인 버튼 클릭됨")
-                    return True
-            except PlaywrightTimeoutError:
-                continue
-
-        typer.echo("   ❌ 로그인 버튼을 찾을 수 없음")
-        return False
-
-    async def _verify_login_success(self, page: Page) -> bool:
-        """로그인 성공 확인 헬퍼 메서드"""
-        try:
-            await page.wait_for_function(
-                """() => {
-                    return window.location.href.includes('reddit.com') &&
-                           !window.location.href.includes('login') &&
-                           (document.querySelector('[data-testid="user-drawer-button"]') ||
-                            document.querySelector('.header-user-dropdown'))
-                }""",
-                timeout=15000,
-            )
-            typer.echo("✅ Reddit 로그인 성공!")
-            return True
-        except PlaywrightTimeoutError:
-            current_url = page.url
-            if "reddit.com" in current_url and "login" not in current_url:
-                typer.echo("✅ Reddit 로그인 성공!")
-                return True
-            else:
-                typer.echo("❌ Reddit 로그인 실패 - URL 확인")
-                if self.debug_mode:
-                    await self._save_debug_html(page, "reddit_login_failed.html")
-                return False
-
     async def _login(self, page: Page) -> bool:
         """Reddit 로그인"""
         try:
             typer.echo("🔑 Reddit 로그인 중...")
             await page.goto("https://www.reddit.com/login/", wait_until="domcontentloaded")
-            await page.wait_for_timeout(3000)
 
-            # 사용자명 입력
-            username_selectors = [
-                "#login-username",
-                "#loginUsername",
-                'input[name="username"]',
-                'input[placeholder*="username" i]',
-                'input[type="text"]',
-            ]
-            if not await self._fill_login_field(
-                page, username_selectors, self.username, "사용자명"
-            ):
+            # 페이지 로드 대기
+            await page.wait_for_timeout(2000)
+
+            typer.echo("   - 사용자명 입력 시도...")
+            username_input = page.get_by_role("textbox", name="Email or username")
+            await username_input.fill(self.username)
+            typer.echo(f"   ✅ 사용자명 입력 완료: {self.username}")
+
+            typer.echo("   - 비밀번호 입력 시도...")
+            password_input = page.get_by_role("textbox", name="Password")
+            await password_input.fill(self.password)
+            typer.echo("   ✅ 비밀번호 입력 완료")
+
+            typer.echo("   - 로그인 버튼 활성화 대기...")
+            login_button = page.get_by_role("button", name="Log In")
+
+            # 로그인 버튼이 활성화될 때까지 기다리기
+            await login_button.wait_for(state="visible", timeout=5000)
+
+            # 버튼이 활성화되었는지 확인
+            for _ in range(10):  # 최대 5초 대기
+                is_enabled = await login_button.is_enabled()
+                if is_enabled:
+                    break
+                await page.wait_for_timeout(500)
+
+            if not await login_button.is_enabled():
+                typer.echo("   ❌ 로그인 버튼이 활성화되지 않음")
+                if self.debug_mode:
+                    await self._save_debug_html(page, "reddit_login_button_disabled.html")
                 return False
 
-            # 비밀번호 입력
-            password_selectors = [
-                "#login-password",
-                "#loginPassword",
-                'input[name="password"]',
-                'input[type="password"]',
-            ]
-            if not await self._fill_login_field(
-                page, password_selectors, self.password, "비밀번호"
-            ):
-                return False
+            typer.echo("   - 로그인 버튼 클릭 시도...")
+            await login_button.click()
+            typer.echo("   🔄 로그인 버튼 클릭됨")
 
-            # 로그인 버튼 클릭
-            if not await self._click_login_button(page):
+            typer.echo("   - 로그인 성공 확인 중...")
+            try:
+                # 성공: 메인 페이지로 리디렉션될 때까지 기다립니다 (최대 15초).
+                await page.wait_for_url("https://www.reddit.com/", timeout=15000)
+                typer.echo("✅ Reddit 로그인 성공!")
+                return True
+            except PlaywrightTimeoutError:
+                # 실패: 오류 메시지가 나타나는지 확인합니다.
+                error_message = page.locator('text="Invalid username or password."')
+                if await error_message.is_visible():
+                    typer.echo("❌ Reddit 로그인 실패: 잘못된 사용자 이름 또는 비밀번호")
+                else:
+                    typer.echo("❌ Reddit 로그인 실패: 알 수 없는 오류")
+                if self.debug_mode:
+                    await self._save_debug_html(page, "reddit_login_failed.html")
                 return False
-
-            # 로그인 성공 확인
-            return await self._verify_login_success(page)
 
         except Exception as e:
             typer.echo(f"❌ 로그인 중 오류: {e}")
@@ -257,36 +213,31 @@ class RedditCrawler(BaseCrawler):
     async def _collect_posts(self, page: Page) -> List[Dict[str, Any]]:
         """현재 페이지의 게시글 수집 - 실제 Reddit 구조에 맞춰 개선"""
         all_posts = []
-        # 다양한 post_container 선택자
-        post_selectors = [
-            'div[data-testid="post-container"]',
-            "div[data-ad-position]",
-            "div.Post",
-        ]
 
-        post_container = None
-        for selector in post_selectors:
-            try:
-                post_container = page.locator(selector)
-                count = await post_container.count()
-                if count > 0:
-                    typer.echo(f"   🔎 '{selector}' 선택자로 {count}개 게시글 컨테이너 발견")
-                    break
-            except Exception:
-                continue
+        # 실제 Reddit 구조에 따라 article 태그 사용
+        try:
+            post_containers = page.locator("article")
+            count = await post_containers.count()
 
-        if not post_container or await post_container.count() == 0:
-            typer.echo("   ❌ 게시글 컨테이너를 찾을 수 없음")
+            if count > 0:
+                typer.echo(f"   🔎 {count}개 게시글 (article) 발견")
+
+                elements = await post_containers.all()
+
+                for element in elements:
+                    post_data = await self._extract_post_data(element)
+                    if post_data:
+                        all_posts.append(post_data)
+
+            else:
+                typer.echo("   ❌ 게시글 컨테이너를 찾을 수 없음")
+                if self.debug_mode:
+                    await self._save_debug_html(page, "reddit_no_posts_found.html")
+
+        except Exception as e:
+            typer.echo(f"   ❌ 게시글 수집 중 오류: {e}")
             if self.debug_mode:
-                await self._save_debug_html(page, "reddit_no_posts_found.html")
-            return []
-
-        elements = await post_container.all()
-
-        for element in elements:
-            post_data = await self._extract_post_data(element)
-            if post_data:
-                all_posts.append(post_data)
+                await self._save_debug_html(page, "reddit_collection_error.html")
 
         return all_posts
 
@@ -296,78 +247,156 @@ class RedditCrawler(BaseCrawler):
             author = await self._extract_author(element)
             content = await self._extract_content(element)
 
-            # 저자나 콘텐츠가 없으면 유효한 게시글이 아님
+            # 디버그 로그 추가
+            if self.debug_mode:
+                typer.echo(f"   🔍 추출 데이터: author='{author}', content='{content[:50]}...'")
+
+            # 저자나 콘텐츠 중 하나라도 있으면 유효한 게시글로 판단 (조건 완화)
             if not author and not content:
+                if self.debug_mode:
+                    typer.echo("   ⚠️ 유효하지 않은 게시글 건너뜀")
                 return None
 
             interactions = await self._extract_interactions(element)
-            return {
-                "author": author,
-                "content": content,
+
+            post_data = {
+                "author": author or "Unknown",
+                "content": content or "No title",
                 "timestamp": await self._extract_timestamp(element),
                 "url": await self._extract_url(element),
-                "likes": interactions.get("likes"),
-                "comments": interactions.get("comments"),
+                "likes": interactions.get("likes", 0),
+                "comments": interactions.get("comments", 0),
                 "shares": None,  # Reddit은 공유 수를 직접 표시하지 않음
             }
-        except Exception:
+
+            if self.debug_mode:
+                typer.echo(
+                    f"   ✅ 게시글 데이터 추출 성공: {post_data['author']} - {post_data['content'][:30]}..."
+                )
+
+            return post_data
+        except Exception as e:
+            if self.debug_mode:
+                typer.echo(f"   ❌ 게시글 데이터 추출 실패: {e}")
             return None
 
     async def _extract_author(self, element) -> str:
-        """게시글에서 작성자 추출"""
-        author_selectors = [
-            'a[data-testid="post_author_link"]',
-            '[data-testid="post-meta-info"] > span:first-of-type',
-            'a[href*="/user/"]',
-            'span[class*="author"]',
-        ]
+        """게시글에서 작성자 추출 - 실제 Reddit 구조에 맞춘 개선"""
         try:
-            for selector in author_selectors:
+            # Reddit 구조에서 서브레딧 정보 추출 (r/subreddit 형태)
+            subreddit_selectors = [
+                'a[href*="/r/"]',  # r/subreddit 링크
+                'link[href*="/r/"]',  # generic link 형태
+            ]
+
+            for selector in subreddit_selectors:
                 try:
-                    author_element = await element.query_selector(selector)
-                    if author_element:
-                        return (await author_element.inner_text()).strip()
+                    subreddit_element = await element.query_selector(selector)
+                    if subreddit_element:
+                        href = await subreddit_element.get_attribute("href")
+                        if href and "/r/" in href:
+                            # /r/subreddit 형태에서 서브레딧명 추출
+                            subreddit_name = href.split("/r/")[-1].split("/")[0]
+                            if subreddit_name:
+                                return f"r/{subreddit_name}"
                 except Exception:
                     continue
+
+            # 서브레딧을 찾을 수 없으면 텍스트에서 직접 찾기
+            text_content = await element.inner_text()
+            if "r/" in text_content:
+                subreddit_match = re.search(r"r/([a-zA-Z0-9_]+)", text_content)
+                if subreddit_match:
+                    return f"r/{subreddit_match.group(1)}"
+
         except Exception:
             pass
         return "Unknown"
 
     async def _extract_content(self, element) -> str:
-        """게시글에서 콘텐츠(제목) 추출"""
-        title_selectors = [
-            "h3",
-            "h2",
-            'div[data-testid="post-title"]',
-            'a[data-click-id="body"] > div > h3',
-        ]
+        """게시글에서 콘텐츠(제목) 추출 - 실제 Reddit 구조에 맞춘 개선"""
         try:
+            # 1. article 태그의 aria-label 속성 확인 (가장 정확한 방법)
+            try:
+                article_aria_label = await element.get_attribute("aria-label")
+                if article_aria_label and len(article_aria_label) > 3:
+                    return article_aria_label.strip()
+            except Exception:
+                pass
+
+            # 2. Reddit 구조에서 제목은 heading 태그에 있음 (level=2)
+            title_selectors = [
+                'heading[level="2"]',  # 정확한 heading 태그
+                "h2",  # 일반적인 h2 태그
+                "h3",  # 대체용 h3 태그
+            ]
+
             for selector in title_selectors:
                 try:
                     title_element = await element.query_selector(selector)
                     if title_element:
-                        return (await title_element.inner_text()).strip()
+                        title_text = (await title_element.inner_text()).strip()
+                        if title_text and len(title_text) > 3:
+                            return title_text
                 except Exception:
                     continue
+
+            # 3. 제목을 찾을 수 없으면 링크 텍스트에서 찾기
+            link_selectors = [
+                'a[href*="/comments/"]',  # 댓글 링크
+                'a[href*="/r/"]',  # 서브레딧 링크
+            ]
+
+            for selector in link_selectors:
+                try:
+                    link_element = await element.query_selector(selector)
+                    if link_element:
+                        link_text = (await link_element.inner_text()).strip()
+                        if link_text and not link_text.startswith("r/") and len(link_text) > 3:
+                            return link_text
+                except Exception:
+                    continue
+
         except Exception:
             pass
         return ""
 
     async def _extract_timestamp(self, element) -> str:
-        """게시글에서 타임스탬프 추출"""
-        timestamp_selectors = [
-            'span[data-testid="post_timestamp"]',
-            'a[data-testid="post_timestamp"]',
-            'span[class*="timestamp"]',
-        ]
+        """게시글에서 타임스탬프 추출 - 실제 Reddit 구조에 맞춘 개선"""
         try:
+            # Reddit 구조에서 시간 정보는 time 태그에 있음
+            timestamp_selectors = [
+                "time",  # 실제 time 태그
+                'span[class*="timestamp"]',  # 대체용 선택자
+                'span[class*="time"]',  # 시간 관련 span
+            ]
+
             for selector in timestamp_selectors:
                 try:
                     time_element = await element.query_selector(selector)
                     if time_element:
-                        return (await time_element.inner_text()).strip()
+                        time_text = (await time_element.inner_text()).strip()
+                        if time_text:
+                            return time_text
                 except Exception:
                     continue
+
+            # 시간을 찾을 수 없으면 텍스트에서 패턴 찾기
+            text_content = await element.inner_text()
+            if text_content:
+                # "X hr. ago", "X min. ago", "X days ago" 등의 패턴 찾기
+                time_patterns = [
+                    r"(\d+)\s+(hr|hour|hours)\.?\s+ago",
+                    r"(\d+)\s+(min|minute|minutes)\.?\s+ago",
+                    r"(\d+)\s+(day|days)\.?\s+ago",
+                    r"(\d+)\s+(sec|second|seconds)\.?\s+ago",
+                ]
+
+                for pattern in time_patterns:
+                    match = re.search(pattern, text_content, re.IGNORECASE)
+                    if match:
+                        return match.group(0)
+
         except Exception:
             pass
         return ""
@@ -395,41 +424,64 @@ class RedditCrawler(BaseCrawler):
         return None
 
     async def _extract_interactions(self, element) -> Dict[str, int]:
-        """게시글에서 상호작용(업보트, 댓글) 데이터 추출"""
+        """게시글에서 상호작용(업보트, 댓글) 데이터 추출 - 실제 Reddit 구조에 맞춘 개선"""
         interactions = {"likes": 0, "comments": 0}
 
         try:
-            # 업보트 추출
-            upvote_text = ""
-            upvote_elements = await element.query_selector_all(
-                '[data-testid="post-content"] > div:last-child > div:first-child > button:first-child > span'
-            )
-            if upvote_elements:
-                upvote_text = await upvote_elements[0].inner_text()
-            else:
-                # 다른 선택자 시도
-                upvote_text_element = await element.query_selector('[id*="vote-arrows"] > div')
-                if upvote_text_element:
-                    upvote_text = await upvote_text_element.inner_text()
+            # 전체 텍스트 내용 가져오기
+            text_content = await element.inner_text()
+            if text_content:
+                # 1. 업보트 수 추출 - 실제 Reddit 구조에서 패턴 찾기
+                upvote_patterns = [
+                    r"Upvote\s+(\d+\.?\d*[KM]?)\s+Downvote",  # "Upvote 307 Downvote"
+                    r"generic:\s*\"(\d+\.?\d*[KM]?)\"\s+.*Downvote",  # "generic: "307" ... Downvote"
+                    r"(\d+\.?\d*[KM]?)\s+Go to comments",  # 때로는 업보트 수가 댓글 전에 나타남
+                ]
 
-            interactions["likes"] = self._parse_number_from_text(upvote_text)
+                for pattern in upvote_patterns:
+                    match = re.search(pattern, text_content)
+                    if match:
+                        interactions["likes"] = self._parse_number_from_text(match.group(1))
+                        break
+
+                # 2. 댓글 수 추출 - "Go to comments" 링크에서 숫자 찾기
+                comment_patterns = [
+                    r"(\d+\.?\d*[KM]?)\s+Go to comments",  # "67 Go to comments"
+                    r"link\s+\"(\d+\.?\d*[KM]?)\s+Go to comments\"",  # 링크 내 텍스트
+                ]
+
+                for pattern in comment_patterns:
+                    match = re.search(pattern, text_content)
+                    if match:
+                        interactions["comments"] = self._parse_number_from_text(match.group(1))
+                        break
+
+                # 3. 대체 방법 - 각 라인에서 숫자 찾기
+                if interactions["likes"] == 0 or interactions["comments"] == 0:
+                    lines = text_content.split("\n")
+                    for i, line in enumerate(lines):
+                        line = line.strip()
+
+                        # 업보트 수 찾기
+                        if interactions["likes"] == 0:
+                            if "Upvote" in line and "Downvote" in line:
+                                numbers = re.findall(r"(\d+\.?\d*[KM]?)", line)
+                                if numbers:
+                                    interactions["likes"] = self._parse_number_from_text(numbers[0])
+                            elif line.isdigit() or (re.match(r"^\d+\.?\d*[KM]?$", line)):
+                                # 다음 라인이 Downvote인지 확인
+                                next_line = lines[i + 1] if i + 1 < len(lines) else ""
+                                if "Downvote" in next_line:
+                                    interactions["likes"] = self._parse_number_from_text(line)
+
+                        # 댓글 수 찾기
+                        if interactions["comments"] == 0 and "Go to comments" in line:
+                            numbers = re.findall(r"(\d+\.?\d*[KM]?)", line)
+                            if numbers:
+                                interactions["comments"] = self._parse_number_from_text(numbers[0])
 
         except Exception:
-            interactions["likes"] = 0
-
-        try:
-            # 댓글 수 추출
-            comment_text = ""
-            comment_element = await element.query_selector('a[data-testid="comment-button"]')
-            if comment_element:
-                comment_text_span = await comment_element.query_selector("span")
-                if comment_text_span:
-                    comment_text = await comment_text_span.inner_text()
-
-            interactions["comments"] = self._parse_number_from_text(comment_text)
-
-        except Exception:
-            interactions["comments"] = 0
+            pass
 
         return interactions
 
